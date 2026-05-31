@@ -6,8 +6,9 @@
 仿照 [esp-qemu](https://github.com/espressif/qemu) 的做法：fork 一个固定版本的 QEMU，加入一个
 in-tree 板卡文件 `hw/riscv/ws63.c`（WS63 机器模型 + 自定义 UART），只构建 `riscv32-softmmu`。
 
-> 状态：**MVP**。可运行 blinky（GPIO 忙等）与 uart_hello（串口打印）。未建模中断控制器、
-> 大多数外设作 MMIO 吸收。详见 [docs/design.md](docs/design.md)。
+> 状态：单核 SoC 模型。已建模 CPU/内存/中断(IRQ 26–31)/Timer/GPIO/SYS_CTL0/UART，跑通 blinky /
+> uart_hello / timer_irq（定时器中断闭环）；其余外设暂作 MMIO 吸收。设计见 [docs/design.md](docs/design.md)，
+> 后续规划见 [ROADMAP.md](ROADMAP.md)。
 
 ## 快速开始
 
