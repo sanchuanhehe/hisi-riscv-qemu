@@ -463,28 +463,69 @@ struct WS63TimerState {
 };
 
 /*
- * Clock tree: the timers count on PCLK, which is the PLL (240 MHz) once locked,
- * falling back to the TCXO (24/40 MHz per SYS_CTL0 HW_CTL). The SoC locks the PLL
- * early in boot (our SYS_CTL0 reports it locked), so PCLK is normally 240 MHz —
- * not the old fixed 24 MHz. UART/SPI/I2C have their own TCXO-vs-PLL select +
- * dividers (CLDO_CRG_CLK_SEL @ 0x44001134); since QEMU's chardev UART isn't
- * rate-limited, only the timer rate is observable, so that is what we drive here.
+ * Clock tree. PCLK = the PLL (240 MHz) once locked, else the TCXO (24/40 MHz per
+ * SYS_CTL0 HW_CTL); the SoC locks the PLL early in boot so PCLK is normally
+ * 240 MHz (not the old fixed 24 MHz). Each peripheral domain is then (a) gated by
+ * a CLDO_CRG_CKEN bit and (b) for UART/SPI/I2C, sourced from TCXO or a PLL-derived
+ * clock by a CLDO_CRG_CLK_SEL bit. Gates default ON: the rs timer HAL never sets
+ * the timer gate and relies on it being clocked, so defaulting off would wrongly
+ * freeze it. Clearing a gate freezes that domain's clock. The timer has no source
+ * select (always PCLK); UART/SPI rates are not behaviorally observable (QEMU's
+ * chardev links aren't rate-limited), so CLK_SEL is tracked but only the timer
+ * gate is observable.
  */
 #define WS63_PLL_HZ        240000000ULL
-static bool     g_ws63_pll_locked = true;       /* SYS_CTL0 reports PLL locked */
-static uint32_t g_ws63_tcxo_hz    = WS63_TCXO_HZ; /* HW_CTL bit0: 0=24 MHz, 1=40 MHz */
+#define WS63_UART_PLL_HZ   160000000ULL          /* UART/SPI PLL-derived clock */
+#define WS63_CKEN0_TIMER   21                    /* CLDO_CRG_CKEN_CTL0 bit (per rs HAL) */
+static bool     g_ws63_pll_locked = true;        /* SYS_CTL0 reports PLL locked */
+static uint32_t g_ws63_tcxo_hz    = WS63_TCXO_HZ;/* HW_CTL bit0: 0=24 MHz, 1=40 MHz */
+static uint32_t g_ws63_cken0      = 0xFFFFFFFFu; /* CLDO_CRG_CKEN_CTL0 @0x44001100 */
+static uint32_t g_ws63_cken1      = 0xFFFFFFFFu; /* CLDO_CRG_CKEN_CTL1 @0x44001104 */
+static uint32_t g_ws63_clk_sel    = 0;           /* CLDO_CRG_CLK_SEL   @0x44001134 */
+static WS63TimerState *g_ws63_timer;             /* for re-arm on gate toggle */
 
 static uint64_t ws63_pclk_hz(void)
 {
     return g_ws63_pll_locked ? WS63_PLL_HZ : g_ws63_tcxo_hz;
 }
 
+/*
+ * Effective clock for a peripheral domain: 0 if its CKEN gate is off, else its
+ * source rate. cken_reg: 0=CKEN_CTL0, 1=CKEN_CTL1. sel_bit < 0 => always PCLK
+ * (the timer); else the CLK_SEL bit picks the PLL-derived (1) vs TCXO (0) source.
+ */
+static uint64_t ws63_periph_clk_hz(int cken_reg, int cken_bit, int sel_bit)
+{
+    uint32_t cken = cken_reg ? g_ws63_cken1 : g_ws63_cken0;
+    if (!(cken & (1u << cken_bit))) {
+        return 0;                                /* clock gated off */
+    }
+    if (sel_bit < 0) {
+        return ws63_pclk_hz();                   /* timer: straight PCLK */
+    }
+    return (g_ws63_clk_sel & (1u << sel_bit)) ? WS63_UART_PLL_HZ : g_ws63_tcxo_hz;
+}
+
+static uint64_t ws63_timer_clk_hz(void)
+{
+    return ws63_periph_clk_hz(0, WS63_CKEN0_TIMER, -1);
+}
+
+static bool ws63_timer_clock_gated(void)
+{
+    return ws63_timer_clk_hz() == 0;
+}
+
 static int64_t ws63_timer_period_ns(uint32_t load)
 {
+    uint64_t hz = ws63_timer_clk_hz();
+    if (hz == 0) {
+        return -1;                               /* gated off -> not running */
+    }
     if (load == 0) {
         load = 1;
     }
-    return (int64_t)((load * 1000000000ULL) / ws63_pclk_hz());
+    return (int64_t)((load * 1000000000ULL) / hz);
 }
 
 static void ws63_timer_update_irq(WS63TimerState *s, unsigned i)
@@ -495,8 +536,13 @@ static void ws63_timer_update_irq(WS63TimerState *s, unsigned i)
 
 static void ws63_timer_arm(WS63TimerState *s, unsigned i)
 {
+    int64_t period = ws63_timer_period_ns(s->load[i]);
+    if (period < 0) {
+        timer_del(s->qt[i]);            /* clock gated off -> stay stopped */
+        return;
+    }
     s->start_ns[i] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    timer_mod(s->qt[i], s->start_ns[i] + ws63_timer_period_ns(s->load[i]));
+    timer_mod(s->qt[i], s->start_ns[i] + period);
 }
 
 static void ws63_timer_tick(void *opaque)
@@ -520,8 +566,12 @@ static uint32_t ws63_timer_current(WS63TimerState *s, unsigned i)
     if (!(s->control[i] & TMR_CONTROL_EN)) {
         return 0;
     }
+    uint64_t hz = ws63_timer_clk_hz();
+    if (hz == 0) {
+        return s->load[i];              /* clock gated off -> frozen at reload */
+    }
     int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->start_ns[i];
-    uint64_t ticks = (uint64_t)(elapsed) * ws63_pclk_hz() / 1000000000ULL;
+    uint64_t ticks = (uint64_t)(elapsed) * hz / 1000000000ULL;
     if (ticks >= s->load[i]) {
         return 0;
     }
@@ -618,6 +668,7 @@ static const MemoryRegionOps ws63_timer_ops = {
 static void ws63_timer_realize(DeviceState *dev, Error **errp)
 {
     WS63TimerState *s = WS63_TIMER(dev);
+    g_ws63_timer = s;                   /* for clock-gate re-arm from CLDO_CRG */
     for (unsigned i = 0; i < 3; i++) {
         ws63_timer_chan_ctx[i][0] = (void *)s;
         ws63_timer_chan_ctx[i][1] = (void *)(uintptr_t)i;
@@ -1037,6 +1088,7 @@ struct WS63PeriphState {
     qemu_irq irq;       /* IRQ output line (DMA/RTC/...) */
     uint32_t kind;
     uint32_t size;
+    hwaddr   base;      /* MMIO base (identifies cldo_crg for the clock tree) */
     uint32_t rng;       /* TRNG LFSR / generic entropy */
     uint32_t dma_done;  /* DMA: per-channel transfer-complete mask */
     uint64_t counter;   /* RTC free-running counter */
@@ -1298,6 +1350,31 @@ static void ws63_periph_write(void *opaque, hwaddr off, uint64_t val, unsigned s
     default:
         break;
     }
+    /*
+     * CLDO_CRG clock gates / source select drive the clock tree: off 0x00 =
+     * CKEN_CTL0, 0x04 = CKEN_CTL1, 0x34 = CLK_SEL. Clearing the timer gate
+     * (CKEN_CTL0 bit21) freezes the timer; setting it resumes (re-armed below).
+     * The shadow store still runs after, so register read-back is consistent.
+     */
+    if (s->kind == PK_GENERIC && s->base == 0x44001100 &&
+        (off == 0x00 || off == 0x04 || off == 0x34)) {
+        bool timer_was_gated = ws63_timer_clock_gated();
+        if (off == 0x00) {
+            g_ws63_cken0 = v;
+        } else if (off == 0x04) {
+            g_ws63_cken1 = v;
+        } else {
+            g_ws63_clk_sel = v;
+        }
+        if (off == 0x00 && g_ws63_timer &&
+            timer_was_gated != ws63_timer_clock_gated()) {
+            for (unsigned i = 0; i < 3; i++) {
+                if (g_ws63_timer->control[i] & TMR_CONTROL_EN) {
+                    ws63_timer_arm(g_ws63_timer, i); /* arm re-checks the gate */
+                }
+            }
+        }
+    }
     s->shadow[(off / 4) % (WS63_PERIPH_MAXSIZE / 4)] = v;
 }
 
@@ -1315,6 +1392,10 @@ static void ws63_periph_realize(DeviceState *dev, Error **errp)
     s->rng = 0x2545f491u ^ (s->kind << 8);
     if (s->kind == PK_RTC || s->kind == PK_WDT) {
         s->qtimer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ws63_periph_timer, s);
+    }
+    if (s->base == 0x44001100) {            /* cldo_crg: CKEN gates default all-on */
+        s->shadow[0x00 / 4] = 0xFFFFFFFFu;  /* CKEN_CTL0 (matches g_ws63_cken0) */
+        s->shadow[0x04 / 4] = 0xFFFFFFFFu;  /* CKEN_CTL1 (matches g_ws63_cken1) */
     }
     memory_region_init_io(&s->iomem, OBJECT(dev), &ws63_periph_ops, s,
                           TYPE_WS63_PERIPH, s->size ? s->size : WS63_PERIPH_MAXSIZE);
@@ -1553,6 +1634,7 @@ static void ws63_machine_init(MachineState *machine)
                                 &s->periph[i], TYPE_WS63_PERIPH);
         s->periph[i].kind = ws63_periph_table[i].kind;
         s->periph[i].size = ws63_periph_table[i].size;
+        s->periph[i].base = ws63_periph_table[i].base;
         sysbus_realize(SYS_BUS_DEVICE(&s->periph[i]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->periph[i]), 0, ws63_periph_table[i].base);
         if (ws63_periph_table[i].irq) {

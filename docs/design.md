@@ -106,7 +106,8 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 | **DMA/SDMA**（0x4A000000/0x520A0000）| ✅ **真实(行为完整)** | 通道使能即**真正搬运内存**（src→dst，按宽度/地址自增），置传输完成位，按 tc_int_en 触发 **IRQ 59**；INT_CLR 清除（裸机测试验证）|
 | **TRNG**（0x44114000）| ✅ 真实 | FIFO_READY=ready、FIFO_DATA 伪随机（xorshift）|
 | **SPACC / PKE / KM**（密码学）| 🟡 影子 | 寄存器影子（**未在启动路径**：mbedtls 用 ROM 表软件 AES）。真实 AES/SHA/RSA 可经 QEMU crypto 库实现，但 SPACC v2 多通道描述符协议复杂且无固件触发，列为按需扩展 |
-| **CLDO_CRG / IO_CONFIG / SYS_CTL1 / PWM / RF_WB_CTL / SHARE_MEM / FAMA_REMAP / ULP_GPIO**（影子）| 🟡 影子 | 见下「配置类为何是影子」 |
+| **CLDO_CRG**（时钟与复位生成）| ✅ 真实(部分) | 时钟门控生效：清 CKEN_CTL0 bit21 冻结定时器、置位恢复（已实测）；CLK_SEL 源路由建模为状态；其余位影子 |
+| **IO_CONFIG / SYS_CTL1 / PWM / RF_WB_CTL / SHARE_MEM / FAMA_REMAP / ULP_GPIO**（影子）| 🟡 影子 | 见下「配置类为何是影子」 |
 
 > **覆盖度**：`WS63.svd` 的全部 **35 个外设**现均有模型（无裸 catch-all 黑洞）。
 > 「行为完整」= 真实数据搬运/计时/中断/转换（DMA/RTC/WDT/Timer/I2C/SPI/I2S/LSADC/GPIO/UART/**TSENSOR/EFUSE**）。
@@ -120,8 +121,9 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 >   复用为其他功能时被门控（引脚改由该外设承载）。裸机验证：复用 GPIO→读到 `1`，复用走→`0`，复用回→`1`。
 >   非 GPIO 功能（UART TX/SPI CLK）的数据本身由各外设的 TX/RX/回环覆盖；pinmux 负责的是"哪根物理引脚承载它"。
 > - **RF_WB_CTL / WiFi / BT**：射频 PHY，物理边界，不仿。
-> - **CLDO_CRG 时钟门控**：省电特性，功能上无意义（固件用前必先开钟）；其*复位位*理论可复位目标外设，
->   但位→外设映射复杂且无固件触发，暂留影子。
+> - **CLDO_CRG 时钟门控（已生效）**：定时器门（CKEN_CTL0 bit21）清零会冻结定时器、置位恢复（默认开，
+>   故不显式开门的固件不受影响）；CLK_SEL 源路由建模为状态。其*复位位*理论可复位目标外设，但位→外设映射
+>   复杂且无固件触发，暂留影子。
 > - **SHARE_MEM_CTL**：核间共享内存控制，单核下无意义。
 > - **SPACC/PKE/KM**：见加密行，真实 AES/SHA/RSA 需复杂且未被触发的描述符协议，按需扩展。
 
@@ -157,7 +159,11 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
    已实测该常规顺序 5/5 通过。
 2. **所有 35 个 SVD 外设均已建模**（见矩阵）：DMA/RTC/WDT/I2C/SPI/I2S/LSADC/UART-RX/GPIO+pinmux 等为完整行为
    （真实数据/时间/IRQ/回环/引脚），少数为配置回读影子（晶体/RF/PHY 等本质模拟量或不可建模硬件）。
-3. **时钟树（部分）**：定时器现以 `ws63_pclk_hz()` 取 PCLK 计时——PLL 锁定时 240 MHz、未锁回退 TCXO（24/40 MHz，
-   依 `HW_CTL`）。UART/SPI/I2C 各有 TCXO/PLL 选择 + 分频（`CLDO_CRG_CLK_SEL@0x44001134`），但 QEMU chardev
-   UART 不做波特率限速，故仅定时器速率可观测。仍非周期精确（无逐级 PLL/分频器状态机）。
+3. **时钟树（门控 + 源路由）**：定时器以 `ws63_periph_clk_hz()` 取 PCLK——PLL 锁定时 240 MHz、未锁回退 TCXO
+   （24/40 MHz，依 `HW_CTL`）。**时钟门控已生效**：`CLDO_CRG_CKEN_CTL0/1`（@0x44001100/04）建模为时钟门，
+   **默认开**（rs 定时器 HAL 不显式开门、依赖默认开）；固件显式清除定时器门（CKEN_CTL0 bit21）会**冻结**定时器
+   （`ws63_timer_arm` 复检门控→`timer_del`），重新置位则**恢复**——已实测 3/3（开→跑、关→冻、再开→恢复）。门控
+   寄存器影子默认 0xFFFFFFFF 与全局一致，故固件的读-改-写不会误清他位。**源路由**：`CLDO_CRG_CLK_SEL@0x44001134`
+   的 TCXO/PLL 选择按 `ws63_periph_clk_hz(reg,bit,sel_bit)` 建模为状态；定时器无源选择（恒 PCLK），UART/SPI 的
+   源/分频在 QEMU chardev 不限速下不可观测，故仅记录状态。仍非周期精确（无逐级 PLL 锁定/分频器状态机）。
 4. 固定 v9.2.4；升级到 v10.x LTS 需注意 API 变化（如 `class_init` 的 `const void *data`、`sysemu/`→`system/` 头文件改名）。
