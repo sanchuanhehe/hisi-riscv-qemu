@@ -1,0 +1,12 @@
+APP|dbg uart init ok.
+[UPG] upg_get_upgrade_flag_flash_start_addr fail
+[UPG] init OK!
+[UPG] upg_get_upgrade_flag_flash_start_addr fail
+APP|init_sle_mac failed!
+APP|mac_addr:0x 0,0x 0,0x73,0x 0,0x**,0x**,
+los_at_plt_cmd_register EXCUTE
+cpu 0 entering scheduler
+APP|exception:5
+APP|cxcptsc = 0x0
+APP|*******backtrace begin*******
+APP|*******backtrace end*******

@@ -43,7 +43,7 @@ index 77e7e98..584cf1f 100644
  void riscv_cpu_set_rdtime_fn(CPURISCVState *env, uint64_t (*fn)(void *),
                               void *arg);
 diff --git a/target/riscv/cpu_helper.c b/target/riscv/cpu_helper.c
-index 803d874..a47800d 100644
+index 803d874..051de3e 100644
 --- a/target/riscv/cpu_helper.c
 +++ b/target/riscv/cpu_helper.c
 @@ -500,6 +500,24 @@ int riscv_cpu_vsirq_pending(CPURISCVState *env)
@@ -124,6 +124,304 @@ index 803d874..a47800d 100644
  void riscv_cpu_set_rdtime_fn(CPURISCVState *env, uint64_t (*fn)(void *),
                               void *arg)
  {
+@@ -1800,6 +1848,278 @@ static target_ulong promote_load_fault(target_ulong orig_cause)
+     /* if no promotion, return original cause */
+     return orig_cause;
+ }
++/*
++ * ===== WS63 mask-ROM call interception =====
++ *
++ * The fbb_ws63 C SDK application calls library functions burned into the on-chip
++ * mask ROM (0x109000..0x14C000); no ROM binary ships with the SDK. When the app
++ * jumps to a ROM entry, the (empty) ROM there traps as an illegal instruction;
++ * we intercept that in riscv_cpu_do_interrupt and emulate the function in host C,
++ * then resume at the caller (ra). Most are stubbed to return 0 (success); mem*_s,
++ * the *printf_s family (delegated to host libc so the app's formatted logs
++ * appear) and the time getters are implemented. Addresses are the ws63-liteos-app
++ * ROM ABI (drivers/chips/ws63/rom_config/acore/acore.sym).
++ */
++#define WS63_ROM_BASE 0x00109000u
++#define WS63_ROM_END  0x0014C000u
++/* Scratch RAM (in the PPB region, past the SCS) for ROM vtables we synthesize. */
++#define WS63_ROM_SCRATCH 0xE000F000u
++enum { WS63_A0 = 10, WS63_A1, WS63_A2, WS63_A3, WS63_A4, WS63_A5, WS63_A6, WS63_A7 };
++
++/*
++ * Some ROM functions return a pointer to a ROM-resident vtable (function-pointer
++ * table) that the app patches (stores its overrides) and later calls through.
++ * We have no ROM data, so hand back a writable scratch slot pre-filled with a
++ * trampoline ROM address in every entry: the app's patched entries win, and
++ * calls through un-patched entries land in the ROM range and dispatch to the
++ * default "return 0 (success)" handler instead of jumping to a null pointer.
++ */
++static uint32_t ws63_rom_vtable(int idx)
++{
++    uint32_t base = WS63_ROM_SCRATCH + (uint32_t)idx * 0x100;
++    uint32_t tramp = WS63_ROM_BASE;
++    for (int k = 0; k < 0x100 / 4; k++) {
++        cpu_physical_memory_write(base + k * 4, &tramp, 4);
++    }
++    return base;
++}
++
++static int ws63_gstr(uint32_t addr, char *out, int max)
++{
++    int i;
++    for (i = 0; i < max - 1; i++) {
++        uint8_t c;
++        cpu_physical_memory_read(addr + i, &c, 1);
++        out[i] = (char)c;
++        if (!c) {
++            return i;
++        }
++    }
++    out[i] = 0;
++    return i;
++}
++
++typedef struct {
++    CPURISCVState *env;
++    int reg;        /* next a-register (varargs) */
++    uint32_t va;    /* va_list pointer (vsnprintf_s) */
++    bool use_va;
++} WS63Args;
++
++static uint32_t ws63_next_arg(WS63Args *a)
++{
++    uint32_t v;
++    if (a->use_va) {
++        cpu_physical_memory_read(a->va, &v, 4);
++        a->va += 4;
++        return v;
++    }
++    if (a->reg <= WS63_A7) {
++        return a->env->gpr[a->reg++];
++    }
++    cpu_physical_memory_read(a->env->gpr[2] + (a->reg - (WS63_A7 + 1)) * 4, &v, 4);
++    a->reg++;
++    return v;
++}
++
++/* Minimal printf: format a guest format string + args into a host buffer,
++ * delegating each directive to host snprintf (correct width/padding/precision). */
++static int ws63_vformat(char *out, int outmax, uint32_t fmt_addr, WS63Args *args)
++{
++    char fmt[512];
++    int n = 0, i = 0;
++
++    ws63_gstr(fmt_addr, fmt, sizeof(fmt));
++    while (fmt[i] && n < outmax - 1) {
++        char spec[32], tmp[256];
++        int s = 0, lng = 0;
++        char conv;
++
++        if (fmt[i] != '%') {
++            out[n++] = fmt[i++];
++            continue;
++        }
++        spec[s++] = fmt[i++];
++        while (fmt[i] && strchr("-+ 0#", fmt[i]) && s < 8) {
++            spec[s++] = fmt[i++];
++        }
++        if (fmt[i] == '*') {            /* width from arg */
++            i++;
++            s += snprintf(&spec[s], sizeof(spec) - s, "%d",
++                          (int)(int32_t)ws63_next_arg(args));
++        } else {
++            while (fmt[i] >= '0' && fmt[i] <= '9' && s < 16) {
++                spec[s++] = fmt[i++];
++            }
++        }
++        if (fmt[i] == '.') {
++            spec[s++] = fmt[i++];
++            if (fmt[i] == '*') {        /* precision from arg */
++                i++;
++                s += snprintf(&spec[s], sizeof(spec) - s, "%d",
++                              (int)(int32_t)ws63_next_arg(args));
++            } else {
++                while (fmt[i] >= '0' && fmt[i] <= '9' && s < 22) {
++                    spec[s++] = fmt[i++];
++                }
++            }
++        }
++        while (fmt[i] == 'l') {
++            lng++;
++            i++;
++        }
++        while (fmt[i] == 'h' || fmt[i] == 'z') {
++            i++;
++        }
++        conv = fmt[i++];
++
++        switch (conv) {
++        case '%':
++            tmp[0] = '%';
++            tmp[1] = 0;
++            break;
++        case 'c':
++            spec[s++] = 'c';
++            spec[s] = 0;
++            snprintf(tmp, sizeof(tmp), spec, (int)ws63_next_arg(args));
++            break;
++        case 's': {
++            char gs[256];
++            ws63_gstr(ws63_next_arg(args), gs, sizeof(gs));
++            spec[s++] = 's';
++            spec[s] = 0;
++            snprintf(tmp, sizeof(tmp), spec, gs);
++            break;
++        }
++        case 'p': {
++            snprintf(tmp, sizeof(tmp), "0x%08x", ws63_next_arg(args));
++            break;
++        }
++        case 'd': case 'i': case 'u': case 'x': case 'X': case 'o':
++            if (lng >= 2) {
++                uint32_t lo = ws63_next_arg(args), hi = ws63_next_arg(args);
++                char hostspec[40];
++                snprintf(hostspec, sizeof(hostspec), "%.*sll%c", s, spec, conv);
++                snprintf(tmp, sizeof(tmp), hostspec, ((uint64_t)hi << 32) | lo);
++            } else {
++                spec[s++] = conv;
++                spec[s] = 0;
++                snprintf(tmp, sizeof(tmp), spec, ws63_next_arg(args));
++            }
++            break;
++        default:
++            tmp[0] = '%';
++            tmp[1] = conv;
++            tmp[2] = 0;
++            break;
++        }
++        for (int k = 0; tmp[k] && n < outmax - 1; k++) {
++            out[n++] = tmp[k];
++        }
++    }
++    out[n] = 0;
++    return n;
++}
++
++static void ws63_rom_call(CPURISCVState *env)
++{
++    uint32_t pc = env->pc;
++    target_ulong *g = env->gpr;
++    long ret = 0;
++
++    switch (pc) {
++    case 0x10aeb4: { /* memcpy_s(dst, dmax, src, n) */
++        uint32_t dst = g[WS63_A0], dmax = g[WS63_A1], src = g[WS63_A2], n = g[WS63_A3];
++        if (n > dmax) { ret = -1; break; }
++        for (uint32_t k = 0; k < n; k++) {
++            uint8_t b;
++            cpu_physical_memory_read(src + k, &b, 1);
++            cpu_physical_memory_write(dst + k, &b, 1);
++        }
++        break;
++    }
++    case 0x10b790: { /* memmove_s(dst, dmax, src, n) */
++        uint32_t dst = g[WS63_A0], dmax = g[WS63_A1], src = g[WS63_A2], n = g[WS63_A3];
++        if (n > dmax) { ret = -1; break; }
++        uint8_t *t = g_malloc(n ? n : 1);
++        cpu_physical_memory_read(src, t, n);
++        cpu_physical_memory_write(dst, t, n);
++        g_free(t);
++        break;
++    }
++    case 0x10b7f6: { /* memset_s(dst, dmax, c, n) */
++        uint32_t dst = g[WS63_A0], dmax = g[WS63_A1], n = g[WS63_A3];
++        uint8_t c = (uint8_t)g[WS63_A2];
++        if (n > dmax) { ret = -1; break; }
++        for (uint32_t k = 0; k < n; k++) {
++            cpu_physical_memory_write(dst + k, &c, 1);
++        }
++        break;
++    }
++    case 0x10cc3c: { /* sprintf_s(dst, dmax, fmt, ...) */
++        uint32_t dst = g[WS63_A0], dmax = g[WS63_A1];
++        char buf[512];
++        WS63Args a = { env, WS63_A3, 0, false };
++        int len = ws63_vformat(buf, sizeof(buf), g[WS63_A2], &a);
++        if (dmax && (uint32_t)len >= dmax) { len = dmax - 1; }
++        cpu_physical_memory_write(dst, buf, len + 1);
++        ret = len;
++        break;
++    }
++    case 0x10cc0a: { /* snprintf_s(dst, dmax, count, fmt, ...) */
++        uint32_t dst = g[WS63_A0], dmax = g[WS63_A1], count = g[WS63_A2];
++        char buf[512];
++        WS63Args a = { env, WS63_A4, 0, false };
++        int len = ws63_vformat(buf, sizeof(buf), g[WS63_A3], &a);
++        uint32_t cap = (count < dmax) ? count : dmax;
++        if (cap && (uint32_t)len >= cap) { len = cap - 1; }
++        cpu_physical_memory_write(dst, buf, len + 1);
++        ret = len;
++        break;
++    }
++    case 0x10d1d0: { /* vsnprintf_s(dst, dmax, count, fmt, va_list) */
++        uint32_t dst = g[WS63_A0], dmax = g[WS63_A1], count = g[WS63_A2];
++        char buf[512];
++        WS63Args a = { env, 0, g[WS63_A4], true };
++        int len = ws63_vformat(buf, sizeof(buf), g[WS63_A3], &a);
++        uint32_t cap = (count < dmax) ? count : dmax;
++        if (cap && (uint32_t)len >= cap) { len = cap - 1; }
++        cpu_physical_memory_write(dst, buf, len + 1);
++        ret = len;
++        break;
++    }
++    case 0x10ac44: /* uapi_systick_get_count */
++    case 0x10acba: /* uapi_systick_get_us */
++    case 0x10d34a: { /* uapi_tcxo_get_us */
++        static uint64_t t_us;
++        t_us += 1000;
++        g[WS63_A1] = (uint32_t)(t_us >> 32);
++        ret = (uint32_t)t_us;
++        break;
++    }
++    case 0x10ac94: /* uapi_systick_get_ms */
++    case 0x10d32c: { /* uapi_tcxo_get_ms */
++        static uint64_t t_ms;
++        t_ms += 1;
++        g[WS63_A1] = 0;
++        ret = (uint32_t)t_ms;
++        break;
++    }
++    case 0x10aa9a: /* hal_timer_v150_get_funcs -> vtable ptr */
++        ret = ws63_rom_vtable(0);
++        break;
++    case 0x109ab8: /* hal_sfc_v150_funcs_get -> vtable ptr */
++        ret = ws63_rom_vtable(1);
++        break;
++    default:
++        ret = 0; /* unknown ROM function: report success */
++        break;
++    }
++
++    g[WS63_A0] = (target_ulong)ret;
++    env->pc = env->gpr[1]; /* return to caller (ra) */
++}
++
+ /*
+  * Handle Traps
+  *
+@@ -1822,6 +2142,18 @@ void riscv_cpu_do_interrupt(CPUState *cs)
+     bool async = !!(cs->exception_index & RISCV_EXCP_INT_FLAG);
+     target_ulong cause = cs->exception_index & RISCV_EXCP_INT_MASK;
+     uint64_t deleg = async ? env->mideleg : env->medeleg;
++
++    /*
++     * WS63: an illegal-instruction trap whose pc is in the mask-ROM range is a
++     * call into an on-chip ROM function we don't have a binary for. Emulate it
++     * in host C and resume at ra instead of taking the trap. (See ws63_rom_call.)
++     */
++    if (!async && cause == RISCV_EXCP_ILLEGAL_INST &&
++        env->pc >= WS63_ROM_BASE && env->pc < WS63_ROM_END) {
++        ws63_rom_call(env);
++        return;
++    }
++
+     bool s_injected = env->mvip & (1ULL << cause) & env->mvien &&
+         !(env->mip & (1ULL << cause));
+     bool vs_injected = env->hvip & (1ULL << cause) & env->hvien &&
 diff --git a/target/riscv/translate.c b/target/riscv/translate.c
 index bccaf8e..ad390ab 100644
 --- a/target/riscv/translate.c

@@ -103,7 +103,7 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 | C SDK 镜像 | 现状 | 边界 |
 |------------|------|------|
 | `flashboot` / `loaderboot`（bootloader，**零掩膜 ROM 依赖**）| ✅ 跑出 UART 输出（时钟 bring-up→flash init）| 下一阻塞 = SFC Flash 控制器（未建模，flash init 优雅失败不挂死）|
-| `ws63-liteos-app`（主应用）| ✅ 正确执行数百万条指令（relocation/dyn_mem_cfg/patch_init/驱动初始化）| 受阻于**掩膜 ROM 边界**：调用 53 个固化在硅片 ROM（`0x109000–0x14C000`）的函数（`vsnprintf_s`/SFC/pin/timer…，ABI 见 `rom_config/acore/acore.sym`），SDK 不提供 ROM 二进制 |
+| `ws63-liteos-app`（主应用）| ✅ **启动 LiteOS、打格式化日志、创建全部 14 子系统任务、进入调度器**（`cpu 0 entering scheduler`）——经掩膜 ROM 调用拦截（宿主 C 模拟 ROM 函数，`*printf_s` 委托宿主 libc）| `bt` 任务深层初始化崩于**ROM 数据墙**（vtable 内容/NV/efuse/BT 标定无 dump）；见 [xlinx-isa.md](xlinx-isa.md) |
 
 构建 C SDK：`cd fbb_ws63/src && python3 build.py ws63-liteos-app -ninja`（厂商工具链已内置）。
 运行：`qemu-system-riscv32 -M ws63 -nographic -serial mon:stdio -kernel <image>.elf`。
