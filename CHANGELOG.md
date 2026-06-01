@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-01
+
 ### Added
 - **Local-interrupt priority/threshold enforcement (LOCIPRI/PRITHD).**
   `ws63_local_irq_pending()` now reads each custom local IRQ's 4-bit `LOCIPRI`
@@ -71,5 +73,6 @@ vendor-compiled firmware without hardware.
 - **Tooling**: `scripts/{build,run,smoke-test,setup-deps}.sh`, a tag-triggered
   release workflow, and the `ROADMAP.md` / `docs/design.md` documentation set.
 
-[Unreleased]: https://github.com/sanchuanhehe/ws63-qemu/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sanchuanhehe/ws63-qemu/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sanchuanhehe/ws63-qemu/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sanchuanhehe/ws63-qemu/releases/tag/v0.1.0
