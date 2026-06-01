@@ -51,7 +51,10 @@ WS63 用 HiSilicon 自定义的「riscv31」核内 CLIC 式方案，不是 CLINT
   返回 IRQ 号；`riscv_cpu_do_interrupt()` 既有逻辑即以 `mcause = irq` 投递（向量化时 `mtvec + 4*irq`）。
   设备经新导出的 `riscv_cpu_set_local_irq(env, irq, level)` 置/清 `locipd`；`LOCIEN`/`LOCIPCLR` CSR 写
   更新 enable/清 pending。**完整投递、已实测**（见 `gpio_irq` 示例，GPIO0 pin0→IRQ 33）。
-  - 简化：优先级 `LOCIPRI`/阈值 `PRITHD` 暂不强制（按 IRQ 号从小到大投递）；可后续细化。
+  - **优先级 / 阈值已强制**：`ws63_local_irq_pending()` 读 `LOCIPRI`（每 IRQ 4 位，8 个/寄存器）取优先级，
+    仅当 `优先级 > PRITHD`（严格大于）才投递，多个候选取最高优先级、同级取最小 IRQ 号；复位默认每 IRQ 优先级 1、
+    阈值 0（即退化为按号投递，兼容旧行为）。CSR 写经 `ws63_loci_write` 镜像入 `env->ws63_locipri[]/ws63_prithd`。
+    已用 LOCIPRI/PRITHD 探针实测（屏蔽 / 抢占 / 严格 `>` 边界 5/5 通过）。
 
 > 即：mie 类（26–31）与自定义本地类（≥32）两条中断线现均已端到端验证。
 
@@ -89,7 +92,7 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 | SYS_CTL0 | ✅ 真实(部分) | 仅时钟状态（TCXO/PLL 锁）；其余读 0 |
 | **TCXO 时钟/计数器** | ✅ 真实(部分) | `0x440004C0`：bit4 count-valid + 64 位单调计数（+0x04/+0x08），供 bootloader us 级延时 |
 | **PPB（核内私有外设总线）** | 🟡 RAM 吸收 | `0xE0000000` FlashPatch 单元 + Cortex-M 式 SCS（`0xE000E000`）；加载已打补丁镜像故补丁单元无意义 |
-| 中断控制器 | ✅ 真实 | IRQ 26–31（mie 类）+ ≥32（自定义 LOCIxx，target/riscv 补丁）均完整投递；优先级阈值未强制 |
+| 中断控制器 | ✅ 真实 | IRQ 26–31（mie 类）+ ≥32（自定义 LOCIxx，target/riscv 补丁）均完整投递；`LOCIPRI` 优先级 + `PRITHD` 阈值已强制（严格 `>`、最高优先级优先、同级取小号）|
 | **SFC（Flash 控制器）** | ✅ 真实(部分) | SPI 命令接口（RDID→W25Q16、RDSR→ready、命令完成）；flash XIP 内容未回填 |
 | **I2C0/1**（0x44018000/0x44018100）| ✅ **真实(行为完整)** | 真实回环 FIFO：TXR→RXR 多字节顺序回读、SR 完成位、COM 命令位自动清、IRQ 31/32 |
 | **SPI0/1**（0x44020000/0x44021000）| ✅ **真实(行为完整)** | 真实回环 FIFO：DR 写入→顺序读回、WSR 反映 FIFO（rxfne/txfe）、RLR 深度、IRQ 43/52 |
@@ -148,8 +151,13 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 
 ## 已知简化（未来工作）
 
-1. **中断优先级 / 阈值未强制**：`LOCIPRI`(2 位优先级) / `PRITHD`(阈值) 仅读回存储，投递按 IRQ 号从小到大
-   而非按优先级抢占。多数固件不依赖；可后续在 `ws63_local_irq_pending()` 中加优先级比较。
-2. **多数外设仅吸收**（见矩阵）。按 `ws63-timer`/`ws63-gpio` 的模式可逐个增量建模。
-3. **CPU/时钟非周期精确**：定时器以名义 24 MHz 计时；无真实 PLL/时钟树。时序不保真。
+1. **中断优先级 / 阈值**：✅ 已强制（`ws63_local_irq_pending()` 按 `LOCIPRI` 优先级 + `PRITHD` 阈值投递，
+   严格 `>`、最高优先级优先、同级取小号）。**剩余细节**：被阈值屏蔽的「已挂起」IRQ 在仅写 CSR 降低阈值
+   （无新边沿）时不会自动重投——需要一次新的中断源边沿。固件一般「先配优先级/阈值、后开中断源」故不触及；
+   已实测该常规顺序 5/5 通过。
+2. **所有 35 个 SVD 外设均已建模**（见矩阵）：DMA/RTC/WDT/I2C/SPI/I2S/LSADC/UART-RX/GPIO+pinmux 等为完整行为
+   （真实数据/时间/IRQ/回环/引脚），少数为配置回读影子（晶体/RF/PHY 等本质模拟量或不可建模硬件）。
+3. **时钟树（部分）**：定时器现以 `ws63_pclk_hz()` 取 PCLK 计时——PLL 锁定时 240 MHz、未锁回退 TCXO（24/40 MHz，
+   依 `HW_CTL`）。UART/SPI/I2C 各有 TCXO/PLL 选择 + 分频（`CLDO_CRG_CLK_SEL@0x44001134`），但 QEMU chardev
+   UART 不做波特率限速，故仅定时器速率可观测。仍非周期精确（无逐级 PLL/分频器状态机）。
 4. 固定 v9.2.4；升级到 v10.x LTS 需注意 API 变化（如 `class_init` 的 `const void *data`、`sysemu/`→`system/` 头文件改名）。

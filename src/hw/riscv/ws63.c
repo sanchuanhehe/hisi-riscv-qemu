@@ -113,8 +113,9 @@
 #define WS63_LOCI_CSR_BASE  0xBC0
 #define WS63_LOCI_CSR_END   0xBFF
 
-/* Timer ticks at the 24 MHz reference (functional, not cycle-accurate). */
-#define WS63_TIMER_HZ       24000000ULL
+/* 24 MHz TCXO reference (timer PCLK falls back to this before the PLL locks;
+ * see ws63_pclk_hz()). The running timer rate is the 240 MHz PLL PCLK. */
+#define WS63_TCXO_HZ        24000000ULL
 
 /* ============================================================================
  * Forward decls
@@ -269,6 +270,15 @@ static RISCVException ws63_loci_write(CPURISCVState *env, int csrno,
     default:
         if (g_ws63_intc) {
             g_ws63_intc->loci[csrno - WS63_LOCI_CSR_BASE] = v;
+        }
+        /* Mirror priority config into the CPU so ws63_local_irq_pending() can
+         * enforce it: LOCIPRI0-15 (0xBC0-0xBCF) + PRITHD (0xBFE). */
+        if (csrno >= 0xBC0 && csrno <= 0xBCF) {
+            env->ws63_locipri[csrno - 0xBC0] = v;
+            riscv_cpu_interrupt(env);
+        } else if (csrno == 0xBFE) {
+            env->ws63_prithd = v & 0xF;
+            riscv_cpu_interrupt(env);
         }
         break;
     }
@@ -452,12 +462,29 @@ struct WS63TimerState {
     int64_t  start_ns[3];
 };
 
+/*
+ * Clock tree: the timers count on PCLK, which is the PLL (240 MHz) once locked,
+ * falling back to the TCXO (24/40 MHz per SYS_CTL0 HW_CTL). The SoC locks the PLL
+ * early in boot (our SYS_CTL0 reports it locked), so PCLK is normally 240 MHz —
+ * not the old fixed 24 MHz. UART/SPI/I2C have their own TCXO-vs-PLL select +
+ * dividers (CLDO_CRG_CLK_SEL @ 0x44001134); since QEMU's chardev UART isn't
+ * rate-limited, only the timer rate is observable, so that is what we drive here.
+ */
+#define WS63_PLL_HZ        240000000ULL
+static bool     g_ws63_pll_locked = true;       /* SYS_CTL0 reports PLL locked */
+static uint32_t g_ws63_tcxo_hz    = WS63_TCXO_HZ; /* HW_CTL bit0: 0=24 MHz, 1=40 MHz */
+
+static uint64_t ws63_pclk_hz(void)
+{
+    return g_ws63_pll_locked ? WS63_PLL_HZ : g_ws63_tcxo_hz;
+}
+
 static int64_t ws63_timer_period_ns(uint32_t load)
 {
     if (load == 0) {
         load = 1;
     }
-    return (int64_t)((load * 1000000000ULL) / WS63_TIMER_HZ);
+    return (int64_t)((load * 1000000000ULL) / ws63_pclk_hz());
 }
 
 static void ws63_timer_update_irq(WS63TimerState *s, unsigned i)
@@ -494,7 +521,7 @@ static uint32_t ws63_timer_current(WS63TimerState *s, unsigned i)
         return 0;
     }
     int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->start_ns[i];
-    uint64_t ticks = (uint64_t)(elapsed) * WS63_TIMER_HZ / 1000000000ULL;
+    uint64_t ticks = (uint64_t)(elapsed) * ws63_pclk_hz() / 1000000000ULL;
     if (ticks >= s->load[i]) {
         return 0;
     }
