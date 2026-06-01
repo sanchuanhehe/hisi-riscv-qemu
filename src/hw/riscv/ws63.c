@@ -863,12 +863,31 @@ struct WS63SysCtl0State {
     uint32_t shadow[WS63_SYSCTL0_SIZE / 4];
 };
 
+/*
+ * Reset model (fbb_ws63 porting/reboot/reboot_porting.c). GLB_CTL_M lives in
+ * the SYS_CTL0 window, so its chip-reset trigger and the reset-reason history
+ * record are handled here:
+ *   0x2110 bit 2  -> chip reset  (HAL_CHIP_RESET_REG, reg32_setbit(...,2))
+ *   0x00A0        -> SYS_RST_RECORD_0  (reset-reason history, read)
+ *   0x00A4        -> SYS_DIAG_CLR_1    (write 1s to clear matched history bits)
+ * The record is a host-side static so it survives qemu_system_reset_request (a
+ * guest reset re-inits device state but not this), letting the firmware read
+ * back "software reset" (bit 1) on the next boot.
+ */
+#define WS63_GLB_CHIP_RESET_OFF  0x2110
+#define WS63_GLB_CHIP_RESET_BIT  (1u << 2)
+#define WS63_SYS_RST_RECORD_OFF  0x00A0
+#define WS63_SYS_DIAG_CLR_OFF    0x00A4
+#define WS63_SYS_SOFT_RST_HIS    0x2
+static uint32_t g_ws63_rst_record;
+
 static uint64_t ws63_sysctl0_read(void *opaque, hwaddr off, unsigned size)
 {
     WS63SysCtl0State *s = opaque;
     switch (off) {
     case 0x0014: return 0;            /* HW_CTL: TCXO 24 MHz */
     case 0x319C: return 1u << 12;     /* REG_EXCEP_RO_RG: PLL locked */
+    case WS63_SYS_RST_RECORD_OFF: return g_ws63_rst_record;
     default: return s->shadow[(off / 4) % (WS63_SYSCTL0_SIZE / 4)];
     }
 }
@@ -877,6 +896,16 @@ static void ws63_sysctl0_write(void *opaque, hwaddr off, uint64_t val,
                                unsigned size)
 {
     WS63SysCtl0State *s = opaque;
+    if (off == WS63_GLB_CHIP_RESET_OFF && (val & WS63_GLB_CHIP_RESET_BIT)) {
+        /* software_reset(): record the cause, then reboot the machine. */
+        g_ws63_rst_record |= WS63_SYS_SOFT_RST_HIS;
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        return;
+    }
+    if (off == WS63_SYS_DIAG_CLR_OFF) {
+        g_ws63_rst_record &= ~(uint32_t)val;
+        return;
+    }
     s->shadow[(off / 4) % (WS63_SYSCTL0_SIZE / 4)] = (uint32_t)val;
 }
 

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **System-reset model** (SYS_CTL0 handler). GLB_CTL_M's chip-reset trigger
+  (`0x40002110` bit 2) now issues `qemu_system_reset_request`, and the reset-reason
+  history record (`SYS_RST_RECORD_0` @ `0x400000A0`, cleared via `SYS_DIAG_CLR_1` @
+  `0x400000A4`) is modelled with a host-side record that survives the guest reset —
+  so firmware reads back "software reset" on the next boot. Mirrors fbb_ws63
+  `reboot_porting.c`. Validates the ws63-rs `System::software_reset` / `reset_reason`
+  rewrite: the new `reset_demo` example round-trips cold-boot → reset → Software, and
+  `scripts/smoke-test.sh` asserts it (CI now builds all default-member examples).
+
 ## [0.3.0] - 2026-06-01
 
 Validation against real vendor firmware: a C SDK peripheral-sample test harness

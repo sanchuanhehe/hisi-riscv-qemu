@@ -50,6 +50,24 @@ else
     echo "==> gpio_irq: SKIP (build it: cargo build -p gpio_irq --release)"
 fi
 
+# ---- reset_demo: software_reset + reset_reason round-trip ----
+RESET_ELF="$TARGET_DIR/reset_demo"
+if [ -f "$RESET_ELF" ]; then
+    echo "==> reset_demo: expecting software_reset() to reboot + reset_reason()=Software"
+    timeout 8 "$QEMU_BIN" -M ws63 -nographic -serial mon:stdio \
+        -kernel "$RESET_ELF" </dev/null >"$TMP/reset.out" 2>/dev/null || true
+    boots=$(grep -c "WS63 system-reset test" "$TMP/reset.out" 2>/dev/null)
+    boots=${boots:-0}
+    if grep -q "OK: software reset observed" "$TMP/reset.out" && [ "$boots" -ge 2 ]; then
+        echo "    PASS: rebooted ($boots boots), reset_reason=Software"
+    else
+        echo "    FAIL: reset round-trip not observed. Got:"; tail -4 "$TMP/reset.out" | sed 's/^/      /'
+        fail=1
+    fi
+else
+    echo "==> reset_demo: SKIP (build it: cargo build -p reset_demo --release)"
+fi
+
 # ---- uart_hello: serial output ----
 UART_ELF="$TARGET_DIR/uart_hello"
 if [ -f "$UART_ELF" ]; then
