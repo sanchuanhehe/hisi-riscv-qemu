@@ -103,7 +103,8 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 | C SDK 镜像 | 现状 | 边界 |
 |------------|------|------|
 | `flashboot` / `loaderboot`（bootloader，**零掩膜 ROM 依赖**）| ✅ 跑出 UART 输出（时钟 bring-up→flash init）| 下一阻塞 = SFC Flash 控制器（未建模，flash init 优雅失败不挂死）|
-| `ws63-liteos-app`（主应用）| ✅ **启动 LiteOS、打格式化日志、创建全部 14 子系统任务、进入调度器**（`cpu 0 entering scheduler`）——经掩膜 ROM 调用拦截（宿主 C 模拟 ROM 函数，`*printf_s` 委托宿主 libc）| `bt` 任务深层初始化崩于**ROM 数据墙**（vtable 内容/NV/efuse/BT 标定无 dump）；见 [xlinx-isa.md](xlinx-isa.md) |
+| `ws63-liteos-app`（主应用，**裁剪 BT+WiFi**）| ✅ **稳定启动到调度器并空转运行**（`cpu 0 entering scheduler` + `radar_timer_init succ`，timer IRQ 26 周期触发，无崩溃）| 仅剩 flash/NV/efuse 内容相关的非致命 `fail` 打印（UPG/NV）；BT/WiFi 任务需子系统 ROM 数据/RF 硬件，已裁剪（`config.py` 注释 `BGLE/BTH/WIFI_TASK_EXIST`）|
+| `ws63-liteos-app`（含 BT/WiFi）| ✅ 启动 LiteOS、创建全部 14 子系统任务、进入调度器 | `bt`/`wifi` 任务深层初始化崩于**ROM 数据墙**（vtable/NV/efuse/RF 标定无 dump）|
 
 构建 C SDK：`cd fbb_ws63/src && python3 build.py ws63-liteos-app -ninja`（厂商工具链已内置）。
 运行：`qemu-system-riscv32 -M ws63 -nographic -serial mon:stdio -kernel <image>.elf`。

@@ -866,6 +866,84 @@ static const TypeInfo ws63_tcxo_typeinfo = {
 };
 
 /* ============================================================================
+ * SFC (Serial Flash Controller, 0x48000000) — the bootloaders and app probe the
+ * SPI flash through the command interface (cmd_ins=opcode @0x308, cmd_config
+ * start bit @0x300, data in cmd_databuf @0x400). We model just enough of the SPI
+ * command protocol for flash identification/status so flash init succeeds:
+ * RDID(0x9F) -> a supported JEDEC ID (W25Q16, 0x1560EF), RDSR(0x05/35/15) -> 0
+ * (ready, unprotected); the start bit auto-clears (command "completes").
+ * ========================================================================= */
+#define TYPE_WS63_SFC "ws63-sfc"
+OBJECT_DECLARE_SIMPLE_TYPE(WS63SfcState, WS63_SFC)
+
+#define WS63_SFC_BASE       0x48000000
+#define WS63_SFC_SIZE       0x00001000
+#define SFC_CMD_CONFIG      0x300   /* bit0 = start (auto-clears when done) */
+#define SFC_CMD_INS         0x308   /* bits[7:0] = SPI opcode */
+#define SFC_CMD_DATABUF0    0x400
+#define SFC_FLASH_ID_W25Q16 0x001560EF
+
+struct WS63SfcState {
+    SysBusDevice parent_obj;
+    MemoryRegion iomem;
+    uint32_t shadow[WS63_SFC_SIZE / 4];
+};
+
+static uint64_t ws63_sfc_read(void *opaque, hwaddr off, unsigned size)
+{
+    WS63SfcState *s = opaque;
+    return s->shadow[(off / 4) % (WS63_SFC_SIZE / 4)];
+}
+
+static void ws63_sfc_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
+{
+    WS63SfcState *s = opaque;
+
+    if (off == SFC_CMD_CONFIG && (val & 0x1)) {
+        uint8_t op = s->shadow[SFC_CMD_INS / 4] & 0xff;
+        switch (op) {
+        case 0x9f: /* RDID */
+            s->shadow[SFC_CMD_DATABUF0 / 4] = SFC_FLASH_ID_W25Q16;
+            break;
+        case 0x05: /* RDSR */
+        case 0x35: /* RDSR2 */
+        case 0x15: /* RDSR3 */
+            s->shadow[SFC_CMD_DATABUF0 / 4] = 0; /* not busy, unprotected */
+            break;
+        default:
+            break;
+        }
+        s->shadow[off / 4] = (uint32_t)val & ~0x1u; /* transfer complete */
+        return;
+    }
+    s->shadow[(off / 4) % (WS63_SFC_SIZE / 4)] = (uint32_t)val;
+}
+
+static const MemoryRegionOps ws63_sfc_ops = {
+    .read = ws63_sfc_read,
+    .write = ws63_sfc_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static void ws63_sfc_instance_init(Object *obj)
+{
+    WS63SfcState *s = WS63_SFC(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+    memory_region_init_io(&s->iomem, obj, &ws63_sfc_ops, s,
+                          TYPE_WS63_SFC, WS63_SFC_SIZE);
+    sysbus_init_mmio(sbd, &s->iomem);
+}
+
+static const TypeInfo ws63_sfc_typeinfo = {
+    .name          = TYPE_WS63_SFC,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(WS63SfcState),
+    .instance_init = ws63_sfc_instance_init,
+};
+
+/* ============================================================================
  * WS63 machine
  * ========================================================================= */
 #define TYPE_WS63_MACHINE MACHINE_TYPE_NAME("ws63")
@@ -879,6 +957,7 @@ struct WS63MachineState {
     WS63GpioState gpio[3];
     WS63SysCtl0State sysctl0;
     WS63TcxoState tcxo;
+    WS63SfcState sfc;
     MemoryRegion bootrom;
     MemoryRegion rom;
     MemoryRegion itcm;
@@ -955,6 +1034,11 @@ static void ws63_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "tcxo", &s->tcxo, TYPE_WS63_TCXO);
     sysbus_realize(SYS_BUS_DEVICE(&s->tcxo), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcxo), 0, WS63_TCXO_BASE);
+
+    /* SFC serial-flash controller (over the absorber) — flash identification. */
+    object_initialize_child(OBJECT(machine), "sfc", &s->sfc, TYPE_WS63_SFC);
+    sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc), 0, WS63_SFC_BASE);
 
     /* TIMER (IRQ 26/27/28). */
     object_initialize_child(OBJECT(machine), "timer", &s->timer, TYPE_WS63_TIMER);
@@ -1050,6 +1134,7 @@ static void ws63_register_types(void)
     type_register_static(&ws63_gpio_typeinfo);
     type_register_static(&ws63_sysctl0_typeinfo);
     type_register_static(&ws63_tcxo_typeinfo);
+    type_register_static(&ws63_sfc_typeinfo);
     type_register_static(&ws63_machine_typeinfo);
 }
 
