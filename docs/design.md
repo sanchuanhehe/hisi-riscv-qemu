@@ -100,7 +100,7 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 | **EFUSE**（0x44008000）| ✅ 真实(部分) | STS boot-done 位 + 数据窗影子（标定内容无 dump）|
 | **WDT**（0x40006000）| ✅ 真实(部分) | CNT←LOAD、EOI 读清；不触发真实复位 |
 | **RTC**（0x57024000）| ✅ 真实(部分) | CURRENT_VALUE 单调递增计数 + INT_STATUS（轮询用）|
-| **DMA/SDMA**（0x4A000000/0x520A0000）| ✅ 真实(部分) | INT_ST 报通道传输完成（轮询不挂死）|
+| **DMA/SDMA**（0x4A000000/0x520A0000）| ✅ **真实(行为完整)** | 通道使能即**真正搬运内存**（src→dst，按宽度/地址自增），置传输完成位，按 tc_int_en 触发 **IRQ 59**；INT_CLR 清除。已用裸机测试验证数据真实拷贝 |
 | **TRNG**（0x44114000）| ✅ 真实 | FIFO_READY=ready、FIFO_DATA 伪随机（xorshift）|
 | **CLDO_CRG / IO_CONFIG / SPACC / PKE / KM / TSENSOR**（影子）| 🟡 影子 | 读写寄存器影子（驱动写后可读回）；无副作用建模 |
 

@@ -95,6 +95,7 @@
 /* IRQ numbers (chip_core_irq.h). 26-31 use standard mie bits; >=32 are custom. */
 #define WS63_IRQ_TIMER0     26
 #define WS63_IRQ_GPIO0      33
+#define WS63_IRQ_DMA        59
 #define WS63_IRQ_MAX        73
 #define WS63_MIE_IRQ_LO     26
 #define WS63_MIE_IRQ_HI     31
@@ -964,12 +965,52 @@ typedef enum {
 struct WS63PeriphState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
+    qemu_irq irq;       /* IRQ output line (DMA/RTC/...) */
     uint32_t kind;
     uint32_t size;
     uint32_t rng;       /* TRNG LFSR / generic entropy */
+    uint32_t dma_done;  /* DMA: per-channel transfer-complete mask */
     uint64_t counter;   /* RTC free-running counter */
     uint32_t shadow[WS63_PERIPH_MAXSIZE / 4];
 };
+
+/*
+ * Real DMA channel transfer: when a channel's cfg.ch_enable is written, copy the
+ * data from src to dst (honoring widths + address increment), mark the channel
+ * transfer-complete, and (if the channel's TC interrupt is enabled+unmasked)
+ * raise the DMA IRQ. Channel regs: base 0x100 + ch*0x20; dest@+0x04, cfg@+0x08,
+ * src@+0x10, ctrl@+0x14 (transfersize[11:0], swsize[20:18], dwsize[23:21],
+ * src_inc[27], dest_inc[28], tc_int_en[31]).
+ */
+static void ws63_dma_run(WS63PeriphState *s, int ch)
+{
+    uint32_t base = 0x100 + (uint32_t)ch * 0x20;
+    uint32_t dst  = s->shadow[(base + 0x04) / 4];
+    uint32_t src  = s->shadow[(base + 0x10) / 4];
+    uint32_t ctrl = s->shadow[(base + 0x14) / 4];
+    uint32_t cfg  = s->shadow[(base + 0x08) / 4];
+    uint32_t count = ctrl & 0xfff;
+    uint32_t sw = 1u << ((ctrl >> 18) & 0x7);
+    uint32_t dw = 1u << ((ctrl >> 21) & 0x7);
+    bool sinc = (ctrl >> 27) & 0x1;
+    bool dinc = (ctrl >> 28) & 0x1;
+    uint32_t i, w = sw < dw ? sw : dw;
+
+    if (count > 0x10000) count = 0x10000;       /* safety bound */
+    if (w == 0 || w > 8) w = 4;
+    for (i = 0; i < count; i++) {
+        uint8_t b[8] = {0};
+        cpu_physical_memory_read(sinc ? src + i * sw : src, b, w);
+        cpu_physical_memory_write(dinc ? dst + i * dw : dst, b, w);
+    }
+    s->dma_done |= (1u << ch);
+    s->shadow[(base + 0x08) / 4] &= ~((1u << 0) | (1u << 10)); /* clr en+active */
+
+    /* tc_int_en (ctrl[31]) and not masked (cfg.tc_int_mask = bit2) -> raise IRQ */
+    if ((ctrl & (1u << 31)) && !(cfg & (1u << 2))) {
+        qemu_set_irq(s->irq, 1);
+    }
+}
 
 static uint32_t ws63_xorshift(uint32_t *s)
 {
@@ -990,7 +1031,14 @@ static uint64_t ws63_periph_read(void *opaque, hwaddr off, unsigned size)
         if (off == 0x14) return s->shadow[0x04 / 4]; /* CNT -> load value */
         break;
     case PK_DMA:
-        if (off == 0x04 || off == 0x0C) return 0xff; /* INT_ST/ORI: all chans done */
+        if (off == 0x04 || off == 0x0C) return s->dma_done; /* INT_ST/ORI_INT_ST */
+        if (off == 0x10) {              /* EN_CHNS: enabled-channel mask */
+            uint32_t m = 0;
+            for (int c = 0; c < 8; c++) {
+                if (s->shadow[(0x100 + c * 0x20 + 0x08) / 4] & 1) m |= 1u << c;
+            }
+            return m;
+        }
         break;
     case PK_TRNG:
         if (off == 0x100) return ws63_xorshift(&s->rng); /* FIFO_DATA */
@@ -1044,6 +1092,23 @@ static void ws63_periph_write(void *opaque, hwaddr off, uint64_t val, unsigned s
             v = 0;                          /* group START self-clears */
         }
         break;
+    case PK_DMA:
+        if (off == 0x08) {                  /* DMAC_INT_CLR: write-clear done bits */
+            s->dma_done &= ~v;
+            if (s->dma_done == 0) {
+                qemu_set_irq(s->irq, 0);
+            }
+            s->shadow[off / 4] = 0;
+            return;
+        }
+        if (off >= 0x100 && off < 0x100 + 8 * 0x20 &&
+            ((off - 0x100) % 0x20) == 0x08 && (v & 1)) {
+            /* channel cfg write with ch_enable -> run the transfer */
+            s->shadow[(off / 4) % (WS63_PERIPH_MAXSIZE / 4)] = v;
+            ws63_dma_run(s, (off - 0x100) / 0x20);
+            return;
+        }
+        break;
     default:
         break;
     }
@@ -1065,6 +1130,7 @@ static void ws63_periph_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->iomem, OBJECT(dev), &ws63_periph_ops, s,
                           TYPE_WS63_PERIPH, s->size ? s->size : WS63_PERIPH_MAXSIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
 }
 
 static void ws63_periph_class_init(ObjectClass *oc, void *data)
@@ -1080,29 +1146,31 @@ static const TypeInfo ws63_periph_typeinfo = {
     .class_init    = ws63_periph_class_init,
 };
 
-/* peripheral instance table (base, kind, window size, name) — from WS63.svd */
-static const struct { hwaddr base; uint32_t kind; uint32_t size; const char *name; }
-ws63_periph_table[] = {
+/* peripheral instance table (base, kind, window size, name, irq) — from WS63.svd.
+ * irq != 0 is connected to the intc (the device raises it via qemu_set_irq). */
+static const struct {
+    hwaddr base; uint32_t kind; uint32_t size; const char *name; int irq;
+} ws63_periph_table[] = {
     /* GLB_CTL_M (0x40002000) is within the SYS_CTL0 window and handled there. */
-    { 0x44001100, PK_GENERIC, 0x1000, "cldo_crg" },
-    { 0x40006000, PK_WDT,     0x1000, "wdt" },
-    { 0x44008000, PK_EFUSE,   0x1000, "efuse" },
-    { 0x4400C000, PK_LSADC,   0x1000, "lsadc" },
-    { 0x4400D000, PK_GENERIC, 0x1000, "io_config" },
-    { 0x4400E000, PK_GENERIC, 0x1000, "tsensor" },
-    { 0x44018000, PK_I2C,     0x100,  "i2c0" },
-    { 0x44018100, PK_I2C,     0x100,  "i2c1" },
-    { 0x44020000, PK_SPI,     0x1000, "spi0" },
-    { 0x44021000, PK_SPI,     0x1000, "spi1" },
-    { 0x44024000, PK_PWM,     0x1000, "pwm" },
-    { 0x44025000, PK_I2S,     0x1000, "i2s" },
-    { 0x44100000, PK_GENERIC, 0x1000, "spacc" },
-    { 0x44110000, PK_GENERIC, 0x1000, "pke" },
-    { 0x44112000, PK_GENERIC, 0x1000, "km" },
-    { 0x44114000, PK_TRNG,    0x1000, "trng" },
-    { 0x4A000000, PK_DMA,     0x1000, "dma" },
-    { 0x520A0000, PK_DMA,     0x1000, "sdma" },
-    { 0x57024000, PK_RTC,     0x1000, "rtc" },
+    { 0x44001100, PK_GENERIC, 0x1000, "cldo_crg",  0 },
+    { 0x40006000, PK_WDT,     0x1000, "wdt",       0 },
+    { 0x44008000, PK_EFUSE,   0x1000, "efuse",     0 },
+    { 0x4400C000, PK_LSADC,   0x1000, "lsadc",     0 },
+    { 0x4400D000, PK_GENERIC, 0x1000, "io_config", 0 },
+    { 0x4400E000, PK_GENERIC, 0x1000, "tsensor",   0 },
+    { 0x44018000, PK_I2C,     0x100,  "i2c0",      0 },
+    { 0x44018100, PK_I2C,     0x100,  "i2c1",      0 },
+    { 0x44020000, PK_SPI,     0x1000, "spi0",      0 },
+    { 0x44021000, PK_SPI,     0x1000, "spi1",      0 },
+    { 0x44024000, PK_PWM,     0x1000, "pwm",       0 },
+    { 0x44025000, PK_I2S,     0x1000, "i2s",       0 },
+    { 0x44100000, PK_GENERIC, 0x1000, "spacc",     0 },
+    { 0x44110000, PK_GENERIC, 0x1000, "pke",       0 },
+    { 0x44112000, PK_GENERIC, 0x1000, "km",        0 },
+    { 0x44114000, PK_TRNG,    0x1000, "trng",      0 },
+    { 0x4A000000, PK_DMA,     0x1000, "dma",       WS63_IRQ_DMA },
+    { 0x520A0000, PK_DMA,     0x1000, "sdma",      0 },
+    { 0x57024000, PK_RTC,     0x1000, "rtc",       0 },
 };
 #define WS63_NUM_PERIPH ARRAY_SIZE(ws63_periph_table)
 
@@ -1214,6 +1282,10 @@ static void ws63_machine_init(MachineState *machine)
         s->periph[i].size = ws63_periph_table[i].size;
         sysbus_realize(SYS_BUS_DEVICE(&s->periph[i]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->periph[i]), 0, ws63_periph_table[i].base);
+        if (ws63_periph_table[i].irq) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->periph[i]), 0,
+                qdev_get_gpio_in(DEVICE(&s->intc), ws63_periph_table[i].irq));
+        }
     }
 
     /* TIMER (IRQ 26/27/28). */
