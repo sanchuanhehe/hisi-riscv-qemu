@@ -124,5 +124,21 @@ else
     echo "==> dma_loopback: SKIP (build it: cargo build -p dma_loopback --release)"
 fi
 
+# ---- wifi_blob_link: link the vendor Wi-Fi ROM blob + resolve externals ----
+BLOB_ELF="$TARGET_DIR/wifi_blob_link"
+if [ -f "$BLOB_ELF" ]; then
+    echo "==> wifi_blob_link: expecting libwifi_rom_data.a to link + relocate"
+    timeout 8 "$QEMU_BIN" -M ws63 -nographic -serial mon:stdio \
+        -kernel "$BLOB_ELF" </dev/null >"$TMP/blob.out" 2>/dev/null || true
+    if grep -q "BLOB LINK SPIKE: PASS" "$TMP/blob.out"; then
+        echo "    PASS: $(grep -m1 g_mem_start "$TMP/blob.out" | sed 's/^[[:space:]]*//')"
+    else
+        echo "    FAIL: blob link/reloc not confirmed. Got:"; tail -5 "$TMP/blob.out" | sed 's/^/      /'
+        fail=1
+    fi
+else
+    echo "==> wifi_blob_link: SKIP (build it: cargo build -p wifi_blob_link --release)"
+fi
+
 [ "$fail" -eq 0 ] && echo "SMOKE TEST: PASS" || echo "SMOKE TEST: FAIL"
 exit "$fail"
