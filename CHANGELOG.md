@@ -8,7 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`docs/rom-stubs.md`** — a dedicated document cataloguing every mask-ROM stub /
+  interception: the `ws63_rom_call` mechanism (illegal-inst trap on 0x109000-0x14C000
+  → host-C emulation) and all emulated ROM functions (`mem*_s`, `*printf_s`,
+  systick/tcxo time, the timer/SFC vtable getters, and the watchdog API), the
+  ROM/boot-adjacent device stubs (TCXO counter, PPB, SYS_CTL0, SFC, flash XIP + NV
+  overlay, low-MMIO absorber), the boot-param hand-off, and the "ROM data wall"
+  limits (BT/WiFi, factory-calibration NV like `xo_trim`, crypto).
+
 ### Fixed
+- **Watchdog ROM API emulated** (`ws63_rom_call`). The whole watchdog stack is
+  mask-ROM-resident, so the calls were no-op-stubbed and the WDT never ran. Now
+  `uapi_watchdog_init/enable/kick/disable/deinit` are emulated: enable arms a virtual
+  one-shot timer, kick re-arms it, and on expiry the SoC reset is requested — the
+  watchdog's actual function. A healthy (kicking) firmware is never reset (the C SDK
+  watchdog sample runs cleanly to the scheduler). The interrupt-mode timeout callback
+  ("watchdog kick timeout!") is not modelled (would need vCPU-synchronised injection).
 - **Local-IRQ storm on C SDK completion interrupts.** Local IRQs ≥32 now auto-clear
   their LOCIPD bit when the CPU takes them (edge/one-shot, matching the SoC's
   LOCIE-group + LOCIPCLR model). Previously a device that held its line asserted
