@@ -239,5 +239,21 @@ else
     echo "==> embassy_multitask: SKIP (build it: cargo build -p embassy_multitask --release)"
 fi
 
+# ---- embassy_async_io: GPIO embedded-hal-async Wait + async UART under embassy ----
+EMBIO_ELF="$TARGET_DIR/embassy_async_io"
+if [ -f "$EMBIO_ELF" ]; then
+    echo "==> embassy_async_io: expecting GPIO Wait + async UART under embassy"
+    timeout 8 "$QEMU_BIN" -M ws63 -nographic -serial mon:stdio \
+        -kernel "$EMBIO_ELF" </dev/null >"$TMP/embio.out" 2>/dev/null || true
+    if grep -q "EMBASSY ASYNC IO: PASS" "$TMP/embio.out"; then
+        echo "    PASS: $(grep -c 'async rising edge' "$TMP/embio.out") async GPIO edges (Wait->IRQ->waker) + async UART"
+    else
+        echo "    FAIL: embassy async-IO not confirmed. Got:"; tail -5 "$TMP/embio.out" | sed 's/^/      /'
+        fail=1
+    fi
+else
+    echo "==> embassy_async_io: SKIP (build it: cargo build -p embassy_async_io --release)"
+fi
+
 [ "$fail" -eq 0 ] && echo "SMOKE TEST: PASS" || echo "SMOKE TEST: FAIL"
 exit "$fail"
