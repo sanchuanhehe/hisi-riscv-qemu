@@ -105,6 +105,7 @@ HAL 的 TX 路径（`uart.rs` `write_byte`）：轮询 `FIFO_STATUS.tx_fifo_full
 | **RTC**（0x57024000）| ✅ **真实(行为完整)** | QEMU 定时器周期触发 **IRQ 29** + INT_STATUS/EOI；CURRENT_VALUE 计数 |
 | **DMA/SDMA**（0x4A000000/0x520A0000）| ✅ **真实(行为完整)** | 通道使能即**真正搬运内存**（src→dst，按宽度/地址自增），置传输完成位，按 tc_int_en 触发 **IRQ 59**；INT_CLR 清除（裸机测试验证）|
 | **TRNG**（0x44114000）| ✅ 真实 | FIFO_READY=ready、FIFO_DATA 伪随机（xorshift）|
+| **合成 Wi-Fi/以太 MAC**（`ws63-netmac` @ 0x44210000）| ✅ **真实(行为完整,合成)** | 软件在环连接性底座（路线图阶段 5）：**不仿 RF/PHY**，在 ws63-rf-rs netif 缝合点暴露最小以太帧 MAC——TX_BUF+TX_GO→`qemu_send_packet`（接 `-nic user` SLIRP NAT），主机帧→`.receive`→RX_BUF + **IRQ 45**（WLMAC_INT）；qtest 整帧收发回环验证。非厂商 WLMAC 寄存器级复刻 |
 | **SPACC / PKE / KM**（密码学）| 🟡 影子 | 寄存器影子（**未在启动路径**：mbedtls 用 ROM 表软件 AES）。真实 AES/SHA/RSA 可经 QEMU crypto 库实现，但 SPACC v2 多通道描述符协议复杂且无固件触发，列为按需扩展 |
 | **CLDO_CRG**（时钟与复位生成）| ✅ 真实(部分) | 时钟门控生效：清 CKEN_CTL0 bit21 冻结定时器、置位恢复（已实测）；CLK_SEL 源路由建模为状态；其余位影子 |
 | **IO_CONFIG / SYS_CTL1 / PWM / RF_WB_CTL / SHARE_MEM / FAMA_REMAP / ULP_GPIO**（影子）| 🟡 影子 | 见下「配置类为何是影子」 |

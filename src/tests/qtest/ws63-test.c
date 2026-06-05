@@ -158,6 +158,99 @@ static void test_dma_mem2mem(void)
     qtest_quit(qts);
 }
 
+/* ---------------------------------------------------------------------------
+ * Synthetic Wi-Fi/Ethernet MAC (ws63-netmac @ 0x44210000, IRQ 45). A real frame
+ * round-trip: bind a SOCK_DGRAM socketpair as the netdev (`-nic socket,fd=`), so
+ * one datagram == one Ethernet frame with no length framing. TX path: stage a
+ * frame + pulse TX_GO -> read it back off the socket. RX path: send a datagram
+ * on the socket -> poll RX_LEN -> read RX_BUF -> assert IRQ status -> RX_ACK.
+ * ------------------------------------------------------------------------- */
+#define NETMAC_BASE        0x44210000u
+#define NETMAC_CTRL        0x000
+#define NETMAC_INT_STATUS  0x004
+#define NETMAC_INT_CLEAR   0x008
+#define NETMAC_TX_LEN      0x00C
+#define NETMAC_TX_GO       0x010
+#define NETMAC_RX_LEN      0x014
+#define NETMAC_RX_ACK      0x018
+#define NETMAC_MAC_LO      0x020
+#define NETMAC_MAC_HI      0x024
+#define NETMAC_TX_BUF      0x1000
+#define NETMAC_RX_BUF      0x2000
+#define NETMAC_EN          0x1
+#define NETMAC_RX_IRQ_EN   0x2
+#define NETMAC_INT_RX      0x1
+
+static uint32_t le32(const uint8_t *p)
+{
+    return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void test_netmac(void)
+{
+    int sv[2];
+    g_assert_cmpint(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv), ==, 0);
+
+    QTestState *qts = qtest_initf("-machine ws63 -nic socket,fd=%d", sv[1]);
+
+    /* enable RX + RX interrupt; staged TX_LEN clamps to the 2048-byte buffer. */
+    qtest_writel(qts, NETMAC_BASE + NETMAC_CTRL, NETMAC_EN | NETMAC_RX_IRQ_EN);
+    g_assert_cmphex(qtest_readl(qts, NETMAC_BASE + NETMAC_CTRL), ==,
+                    NETMAC_EN | NETMAC_RX_IRQ_EN);
+    qtest_writel(qts, NETMAC_BASE + NETMAC_TX_LEN, 9999);
+    g_assert_cmpuint(qtest_readl(qts, NETMAC_BASE + NETMAC_TX_LEN), ==, 2048);
+
+    /* default MAC must be programmed (qemu_macaddr_default_if_unset). */
+    g_assert_cmpuint(qtest_readl(qts, NETMAC_BASE + NETMAC_MAC_LO) |
+                     qtest_readl(qts, NETMAC_BASE + NETMAC_MAC_HI), !=, 0);
+
+    /* --- TX: stage a frame, pulse TX_GO, read it back off the socket --- */
+    static const int LEN = 64;
+    uint8_t tx[64], rx[64];
+    for (int i = 0; i < LEN; i++) {
+        tx[i] = (uint8_t)(0xA0 + i);
+    }
+    for (int i = 0; i < LEN; i += 4) {
+        qtest_writel(qts, NETMAC_BASE + NETMAC_TX_BUF + i, le32(&tx[i]));
+    }
+    qtest_writel(qts, NETMAC_BASE + NETMAC_TX_LEN, LEN);
+    qtest_writel(qts, NETMAC_BASE + NETMAC_TX_GO, 1);
+
+    g_assert_cmpint(recv(sv[0], rx, sizeof(rx), 0), ==, LEN);
+    g_assert_cmpmem(rx, LEN, tx, LEN);
+
+    /* --- RX: inject a datagram, poll RX_LEN, read it back, check IRQ --- */
+    uint8_t in[64], out[64];
+    for (int i = 0; i < LEN; i++) {
+        in[i] = (uint8_t)(0x5A ^ i);
+    }
+    g_assert_cmpint(send(sv[0], in, LEN, 0), ==, LEN);
+
+    uint32_t rx_len = 0;
+    for (int spin = 0; spin < 2000 && rx_len == 0; spin++) {
+        rx_len = qtest_readl(qts, NETMAC_BASE + NETMAC_RX_LEN);
+    }
+    g_assert_cmpuint(rx_len, ==, (uint32_t)LEN);
+    g_assert_cmphex(qtest_readl(qts, NETMAC_BASE + NETMAC_INT_STATUS) &
+                    NETMAC_INT_RX, ==, NETMAC_INT_RX);
+
+    for (int i = 0; i < LEN; i += 4) {
+        uint32_t w = qtest_readl(qts, NETMAC_BASE + NETMAC_RX_BUF + i);
+        out[i] = w & 0xFF; out[i + 1] = (w >> 8) & 0xFF;
+        out[i + 2] = (w >> 16) & 0xFF; out[i + 3] = (w >> 24) & 0xFF;
+    }
+    g_assert_cmpmem(out, LEN, in, LEN);
+
+    /* RX_ACK releases the buffer and drops the interrupt. */
+    qtest_writel(qts, NETMAC_BASE + NETMAC_RX_ACK, 1);
+    g_assert_cmphex(qtest_readl(qts, NETMAC_BASE + NETMAC_INT_STATUS) &
+                    NETMAC_INT_RX, ==, 0);
+
+    qtest_quit(qts);
+    close(sv[0]);
+    close(sv[1]);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -165,5 +258,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ws63/uart", test_uart);
     qtest_add_func("/ws63/timer_intc", test_timer_and_intc);
     qtest_add_func("/ws63/dma_mem2mem", test_dma_mem2mem);
+    qtest_add_func("/ws63/netmac", test_netmac);
     return g_test_run();
 }

@@ -39,6 +39,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 #include "hw/misc/unimp.h"
+#include "net/net.h"   /* synthetic Wi-Fi/Ethernet MAC (ws63-netmac) */
 #include "chardev/char.h"
 #include "chardev/char-fe.h"
 #include "target/riscv/cpu.h"
@@ -101,6 +102,7 @@
 #define WS63_IRQ_I2C1       32
 #define WS63_IRQ_GPIO0      33
 #define WS63_IRQ_SPI0       43
+#define WS63_IRQ_WLMAC      45
 #define WS63_IRQ_I2S        51
 #define WS63_IRQ_SPI1       52
 #define WS63_IRQ_UART0      53
@@ -1604,6 +1606,205 @@ static const TypeInfo ws63_pinmux_typeinfo = {
 };
 
 /* ============================================================================
+ * Synthetic Wi-Fi/Ethernet MAC (ws63-netmac, 0x44210000) — the software-in-the-
+ * loop connectivity base (ROADMAP phase 5). The real WS63 Wi-Fi datapath is a
+ * closed RF/PHY blob (hardware-in-the-loop only); we DO NOT model the radio.
+ * Instead we expose a minimal Ethernet-frame MAC at the ws63-rf-rs netif seam:
+ * firmware writes a frame into TX_BUF + TX_LEN and pulses TX_GO, and we hand the
+ * frame to the QEMU netdev (SLIRP/-nic user NAT). Host-side frames arrive via the
+ * .receive callback into RX_BUF and raise IRQ 45 (WLMAC_INT). This lets ws63-rs's
+ * smoltcp stack do ARP/ICMP/UDP over the user-mode NAT without any radio model.
+ * Pairs with `-nic user`. NOT a register-faithful model of the vendor WLMAC.
+ * ========================================================================= */
+#define TYPE_WS63_NETMAC "ws63-netmac"
+OBJECT_DECLARE_SIMPLE_TYPE(WS63NetMacState, WS63_NETMAC)
+
+#define WS63_NETMAC_BASE      0x44210000   /* WIFI_SUB region */
+#define WS63_NETMAC_SIZE      0x00004000
+#define WS63_NETMAC_BUF_MAX   2048         /* >= max Ethernet frame */
+
+/* Register map (offsets within the 16 KiB window). */
+#define NETMAC_CTRL           0x000   /* RW  bit0 enable, bit1 rx_irq_en */
+#define NETMAC_INT_STATUS     0x004   /* RO  bit0 rx_ready */
+#define NETMAC_INT_CLEAR      0x008   /* W1C bit0 rx_ready */
+#define NETMAC_TX_LEN         0x00C   /* RW  bytes staged in TX_BUF */
+#define NETMAC_TX_GO          0x010   /* W1  send the staged frame */
+#define NETMAC_RX_LEN         0x014   /* RO  bytes available in RX_BUF */
+#define NETMAC_RX_ACK         0x018   /* W1  release RX_BUF for the next frame */
+#define NETMAC_MAC_LO         0x020   /* RO  mac[0..3] (little-endian) */
+#define NETMAC_MAC_HI         0x024   /* RO  mac[4..5] */
+#define NETMAC_TX_BUF         0x1000  /* TX frame staging buffer */
+#define NETMAC_RX_BUF         0x2000  /* RX frame buffer */
+
+#define NETMAC_CTRL_ENABLE    0x1
+#define NETMAC_CTRL_RX_IRQ_EN 0x2
+#define NETMAC_INT_RX_READY   0x1
+
+struct WS63NetMacState {
+    SysBusDevice parent_obj;
+    MemoryRegion iomem;
+    qemu_irq irq;
+    NICState *nic;
+    NICConf conf;
+    uint32_t ctrl;
+    uint32_t tx_len;
+    uint32_t rx_len;
+    bool rx_ready;
+    uint8_t txbuf[WS63_NETMAC_BUF_MAX];
+    uint8_t rxbuf[WS63_NETMAC_BUF_MAX];
+};
+
+static void ws63_netmac_update_irq(WS63NetMacState *s)
+{
+    qemu_set_irq(s->irq, s->rx_ready && (s->ctrl & NETMAC_CTRL_RX_IRQ_EN));
+}
+
+/* Net core asks before delivering: accept only when enabled and RX_BUF is free. */
+static bool ws63_netmac_can_receive(NetClientState *nc)
+{
+    WS63NetMacState *s = qemu_get_nic_opaque(nc);
+    return (s->ctrl & NETMAC_CTRL_ENABLE) && !s->rx_ready;
+}
+
+static ssize_t ws63_netmac_receive(NetClientState *nc, const uint8_t *buf,
+                                   size_t size)
+{
+    WS63NetMacState *s = qemu_get_nic_opaque(nc);
+
+    if (!(s->ctrl & NETMAC_CTRL_ENABLE) || s->rx_ready) {
+        return 0;   /* not ready: net core re-queues and retries later */
+    }
+    if (size > WS63_NETMAC_BUF_MAX) {
+        size = WS63_NETMAC_BUF_MAX;   /* truncate oversized frames */
+    }
+    memcpy(s->rxbuf, buf, size);
+    s->rx_len = size;
+    s->rx_ready = true;
+    ws63_netmac_update_irq(s);
+    return size;
+}
+
+static uint64_t ws63_netmac_read(void *opaque, hwaddr off, unsigned sz)
+{
+    WS63NetMacState *s = opaque;
+
+    if (off >= NETMAC_RX_BUF && off < NETMAC_RX_BUF + WS63_NETMAC_BUF_MAX) {
+        return ldl_le_p(&s->rxbuf[off - NETMAC_RX_BUF]);
+    }
+    if (off >= NETMAC_TX_BUF && off < NETMAC_TX_BUF + WS63_NETMAC_BUF_MAX) {
+        return ldl_le_p(&s->txbuf[off - NETMAC_TX_BUF]);
+    }
+    switch (off) {
+    case NETMAC_CTRL:
+        return s->ctrl;
+    case NETMAC_INT_STATUS:
+        return s->rx_ready ? NETMAC_INT_RX_READY : 0;
+    case NETMAC_TX_LEN:
+        return s->tx_len;
+    case NETMAC_RX_LEN:
+        return s->rx_len;
+    case NETMAC_MAC_LO:
+        return ldl_le_p(&s->conf.macaddr.a[0]);
+    case NETMAC_MAC_HI:
+        return s->conf.macaddr.a[4] | (s->conf.macaddr.a[5] << 8);
+    default:
+        return 0;
+    }
+}
+
+static void ws63_netmac_write(void *opaque, hwaddr off, uint64_t val, unsigned sz)
+{
+    WS63NetMacState *s = opaque;
+
+    if (off >= NETMAC_TX_BUF && off < NETMAC_TX_BUF + WS63_NETMAC_BUF_MAX) {
+        stl_le_p(&s->txbuf[off - NETMAC_TX_BUF], (uint32_t)val);
+        return;
+    }
+    switch (off) {
+    case NETMAC_CTRL:
+        s->ctrl = (uint32_t)val;
+        ws63_netmac_update_irq(s);
+        return;
+    case NETMAC_INT_CLEAR:
+        if (val & NETMAC_INT_RX_READY) {
+            s->rx_ready = false;
+            ws63_netmac_update_irq(s);
+        }
+        return;
+    case NETMAC_TX_LEN:
+        s->tx_len = (uint32_t)val;
+        if (s->tx_len > WS63_NETMAC_BUF_MAX) {
+            s->tx_len = WS63_NETMAC_BUF_MAX;
+        }
+        return;
+    case NETMAC_TX_GO:
+        if ((s->ctrl & NETMAC_CTRL_ENABLE) && s->tx_len) {
+            qemu_send_packet(qemu_get_queue(s->nic), s->txbuf, s->tx_len);
+        }
+        return;
+    case NETMAC_RX_ACK:
+        s->rx_ready = false;
+        ws63_netmac_update_irq(s);
+        return;
+    default:
+        return;   /* RO / unknown registers: absorb */
+    }
+}
+
+static const MemoryRegionOps ws63_netmac_ops = {
+    .read = ws63_netmac_read,
+    .write = ws63_netmac_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static NetClientInfo ws63_netmac_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = ws63_netmac_can_receive,
+    .receive = ws63_netmac_receive,
+};
+
+static void ws63_netmac_realize(DeviceState *dev, Error **errp)
+{
+    WS63NetMacState *s = WS63_NETMAC(dev);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+
+    memory_region_init_io(&s->iomem, OBJECT(dev), &ws63_netmac_ops, s,
+                          TYPE_WS63_NETMAC, WS63_NETMAC_SIZE);
+    sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
+
+    qemu_macaddr_default_if_unset(&s->conf.macaddr);
+    s->nic = qemu_new_nic(&ws63_netmac_net_info, &s->conf,
+                          TYPE_WS63_NETMAC, dev->id,
+                          &dev->mem_reentrancy_guard, s);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
+}
+
+static Property ws63_netmac_props[] = {
+    DEFINE_NIC_PROPERTIES(WS63NetMacState, conf),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void ws63_netmac_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = ws63_netmac_realize;
+    device_class_set_props(dc, ws63_netmac_props);
+    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
+}
+
+static const TypeInfo ws63_netmac_typeinfo = {
+    .name          = TYPE_WS63_NETMAC,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(WS63NetMacState),
+    .class_init    = ws63_netmac_class_init,
+};
+
+/* ============================================================================
  * WS63 machine
  * ========================================================================= */
 #define TYPE_WS63_MACHINE MACHINE_TYPE_NAME("ws63")
@@ -1619,6 +1820,7 @@ struct WS63MachineState {
     WS63TcxoState tcxo;
     WS63SfcState sfc;
     WS63PinmuxState pinmux;
+    WS63NetMacState netmac;
     WS63PeriphState periph[WS63_NUM_PERIPH];
     MemoryRegion bootrom;
     MemoryRegion rom;
@@ -1766,6 +1968,16 @@ static void ws63_machine_init(MachineState *machine)
                            qdev_get_gpio_in(DEVICE(&s->intc), WS63_IRQ_UART0 + i));
     }
 
+    /* Synthetic Wi-Fi/Ethernet MAC (0x44210000, IRQ 45). Binds the default
+     * `-nic user` netdev so smoltcp can reach the SLIRP NAT. Configure the NIC
+     * BEFORE realize so qemu_new_nic() picks up the user-supplied netdev. */
+    object_initialize_child(OBJECT(machine), "netmac", &s->netmac, TYPE_WS63_NETMAC);
+    qemu_configure_nic_device(DEVICE(&s->netmac), true, NULL);
+    sysbus_realize(SYS_BUS_DEVICE(&s->netmac), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->netmac), 0, WS63_NETMAC_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->netmac), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), WS63_IRQ_WLMAC));
+
     /* Firmware ELF (-kernel). Entry overrides the default reset PC. */
     if (machine->kernel_filename) {
         uint64_t elf_entry;
@@ -1825,6 +2037,7 @@ static void ws63_register_types(void)
     type_register_static(&ws63_tcxo_typeinfo);
     type_register_static(&ws63_sfc_typeinfo);
     type_register_static(&ws63_pinmux_typeinfo);
+    type_register_static(&ws63_netmac_typeinfo);
     type_register_static(&ws63_periph_typeinfo);
     type_register_static(&ws63_machine_typeinfo);
 }
