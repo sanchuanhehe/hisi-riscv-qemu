@@ -63,11 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v11 six `hw/*.h`→`hw/core/*.h`. The `qtest-matrix` now has all four versions
   green; the forward radar will point at the next QEMU release. See
   `patches/README.md`.
-  - **Known v11 limitation**: the firmware smoke-test passes 16/17 on v11 (qtest
-    5/5, C-SDK 5/5, including the blob-*link* example); only `rf_port_demo` (which
-    *executes* the vendor Wi-Fi blob through the porting layer) hangs in pure
-    compute on v11 — no MMIO/exception/unimp events. Does not affect the
-    qtest-matrix (qtest only) or `ci.yml` (runs on the v10.0.0 default).
+
+### Fixed
+- **QEMU v11.0 upstream regression in RV32 `mcycleh`/`minstreth`**
+  (`patches/v11.0.1/0005`): v11's `riscv_pmu_read_ctr()` slices the high/low half
+  of `ctr_prev`/`ctr_val` for an RV32 fixed counter but reads the fixed-counter
+  value (`cpu_get_host_ticks()`) un-sliced, so the upper-half read returns the
+  *low* 32 bits — which change every read. Firmware doing the standard atomic
+  64-bit cycle read (`csrr hi,mcycleh; csrr lo,mcycle; csrr hi2,mcycleh; bne`)
+  never converges and spins forever (ws63-rs `rf_port_demo` hung after
+  `osal_kmalloc` on v11; fine on v9.2.4/v10.0.0/v10.2.3, which sliced internally).
+  Fix slices the fixed-counter value with the same `extract64`. v11 firmware
+  smoke-test 16/17 → 17/17. A generic upstream fix, worth reporting to QEMU.
 
 ## [0.3.0] - 2026-06-01
 

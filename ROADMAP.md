@@ -175,17 +175,19 @@ system reset、IO_CONFIG pinmux 路由亦已建模。完整矩阵见 [`docs/desi
   生成、`git apply` 应用):`0001` target/riscv 核(CPU 型号 + 本地中断 + xlinx 解码 + ROM 拦截)、`0002` 注册机器
   (meson/Kconfig/trace-events)、`0003` 注册 qtest;旧版本另带 `0004` 适配 ws63.c 的旧 API。`build.sh` 选 `patches/$QEMU_TAG/`
   应用,仅剩「拷 3 个新文件 + apply 该版本序列」,无 sed/cat 追加;版本未建目录则报错列出已支持版本。详见 [`patches/README.md`](patches/README.md)。
-- **同时维护 v10.0.0(默认)、v10.2.3、v11.0.1、v9.2.4 四条序列**,均实测「序列可应用 + 构建 + qtest 5/5」
-  (v10.x/v11 另过 C SDK;v11 固件冒烟 16/17 过,详见下「v11 已知限制」)。逐版漂移很能说明问题——10.0→10.2:
-  `insn_len`→`internals.h`、CPU 定义改声明式 `DEFINE_RISCV_CPU`、`decode_opc` 改表驱动、`CharBackend`→`CharFrontend`、
-  `exec/`→`system/address-spaces.h`;10.2→11:六个 `hw/*.h`→`hw/core/*.h` 头大迁移——正因如此才按版本分目录。
+- **同时维护 v10.0.0(默认)、v10.2.3、v11.0.1、v9.2.4 四条序列**,均实测「序列可应用 + 构建 + qtest 5/5 + C SDK 5/5 +
+  固件冒烟全过」。逐版漂移很能说明问题——10.0→10.2:`insn_len`→`internals.h`、CPU 定义改声明式 `DEFINE_RISCV_CPU`、
+  `decode_opc` 改表驱动、`CharBackend`→`CharFrontend`、`exec/`→`system/address-spaces.h`;10.2→11:六个 `hw/*.h`→`hw/core/*.h`
+  头大迁移——正因如此才按版本分目录。
 - **CI 已就位**(build + 双固件冒烟 + C SDK 样例 + QEMU 构建缓存),默认 tag = v10.0.0。
 - **qtest 矩阵已就位**(`qtest-matrix.yml`):寄存器级 qtest 在**每个有 `patches/<tag>/` 的版本上必过**
   (v9.2.4 + v10.0.0 + v10.2.3 + v11.0.1 全绿)。v11.0.1 已是最新稳定 tag,故暂无「前向雷达」红 cell;QEMU 出更新版本时,
   按 `qtest-matrix.yml` 注释加一个实验 cell 即可。无需 Rust 工具链/不启动固件,周一定时跑一次。
-- **v11 已知限制**:固件冒烟 16/17 过(含 qtest 5/5、C SDK 5/5、wifi_blob_link、net_ping、async/embassy 等);
-  唯 `rf_port_demo`(实际**执行**厂商 Wi-Fi blob 的例子)在 v11 上挂起(纯计算死循环,无 MMIO/异常/unimp 事件)——
-  blob 在 v11 走了不同路径,属窄域 v11 行为差异,**不影响 qtest 矩阵(只跑 qtest)或 ci.yml(跑默认 v10.0.0)**,待查。
+- **已修:v11 上 `rf_port_demo` 挂起 → 定位为 QEMU v11.0 上游回归**:`riscv_pmu_read_ctr()`(`target/riscv/csr.c`)对 RV32
+  定点计数器的**高半字读未切片**——`mcycleh` 返回 64 位计数(`cpu_get_host_ticks()`)的**低 32 位**而非高 32 位,每次读都在变,
+  固件标准的 64 位原子读循环(读高/读低/再读高/`bne`)永不收敛而死转(v9.2.4/v10.0.0/v10.2.3 在旧实现里内部切片故正常)。
+  已由 `patches/v11.0.1/0005-target-riscv-fix-rv32-mcycleh-pmu-regression.patch` 修复(对定点计数值施加同样的 `extract64`),
+  v11 固件冒烟由 16/17 → **17/17 全过**。该补丁是**通用上游回归修复**,值得回报 upstream。
 - 可能向上游提交基础机器(`hw/riscv/ws63.c`)+ qtests(HiSilicon WS63 board)——patch-series 已是上游友好格式。
 
 ---

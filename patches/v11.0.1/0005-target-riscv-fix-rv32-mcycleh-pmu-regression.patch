@@ -1,0 +1,46 @@
+From bdf778e99f1efab2d859362f9f0012758651fa6c Mon Sep 17 00:00:00 2001
+From: ws63-rs <noreply@anthropic.com>
+Date: Fri, 5 Jun 2026 14:11:50 +0800
+Subject: [PATCH] target/riscv: fix RV32 mcycleh/minstreth PMU read (upstream
+ v11 regression)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+QEMU v11.0's riscv_pmu_read_ctr() (target/riscv/csr.c) extract64()s the high/low
+slice of ctr_prev/ctr_val for an RV32 fixed counter, but reads the fixed-counter
+value (riscv_pmu_ctr_get_fixed_counters_val) WITHOUT slicing — so the upper-half
+read (mcycleh / minstreth) returns the low 32 bits of the 64-bit counter
+(cpu_get_host_ticks()) instead of the high 32 bits. The value then changes on
+every read, so firmware doing the standard atomic 64-bit read
+  csrr hi, mcycleh; csrr lo, mcycle; csrr hi2, mcycleh; bne hi, hi2, retry
+never converges and spins forever (observed: ws63-rs rf_port_demo hangs after
+osal_kmalloc on v11; passes on v9.2.4/v10.0.0/v10.2.3, which sliced the fixed
+value internally via the pre-v11 get_fixed_counters_val(..., upper_half)).
+
+Fix: slice the fixed-counter value with the same extract64(.., start, length)
+applied to ctr_prev/ctr_val. Restores correct mcycleh/minstreth on RV32.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ target/riscv/csr.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/target/riscv/csr.c b/target/riscv/csr.c
+index 29dd596..848b02c 100644
+--- a/target/riscv/csr.c
++++ b/target/riscv/csr.c
+@@ -1389,8 +1389,8 @@ RISCVException riscv_pmu_read_ctr(CPURISCVState *env, target_ulong *val,
+      */
+     if (riscv_pmu_ctr_monitor_cycles(env, ctr_idx) ||
+         riscv_pmu_ctr_monitor_instructions(env, ctr_idx)) {
+-        *val = riscv_pmu_ctr_get_fixed_counters_val(env, ctr_idx) -
+-                                                    ctr_prev + ctr_val;
++        *val = extract64(riscv_pmu_ctr_get_fixed_counters_val(env, ctr_idx),
++                         start, length) - ctr_prev + ctr_val;
+     } else {
+         *val = ctr_val;
+     }
+-- 
+2.43.0
+

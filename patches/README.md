@@ -33,6 +33,7 @@ Each version dir holds the same logical series:
 | `0002-hw-riscv-*` | `hw/riscv/{meson.build,Kconfig,trace-events}` | register the machine |
 | `0003-tests-qtest-*` | `tests/qtest/meson.build` | register `ws63-test` |
 | `0004-*` (version-specific) | the copied `ws63.c` | adapts it to a non-default QEMU API. `v9.2.4/0004`: `system/`→`sysemu/` headers + non-`const` `Property[]` with `DEFINE_PROP_END_OF_LIST`. `v10.2.3/0004`: `exec/`→`system/address-spaces.h` + `CharBackend`→`CharFrontend`. `v11.0.1/0004`: the v10.2 changes + six `hw/*.h`→`hw/core/*.h` (v11 header reorg) |
+| `0005-*` (version-specific) | upstream QEMU bug | a generic fix the pinned QEMU needs. `v11.0.1/0005`: fixes an RV32 `mcycleh`/`minstreth` PMU regression in `riscv_pmu_read_ctr()` (high-half read returned the low 32 bits of `cpu_get_host_ticks()`), which made firmware's atomic 64-bit cycle read spin forever |
 
 Note how the same support drifts across releases: 10.0→10.2 alone moved `insn_len`
 to `internals.h`, made the CPU definition declarative (`DEFINE_RISCV_CPU`),
