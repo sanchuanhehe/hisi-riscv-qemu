@@ -54,12 +54,20 @@ print(f"code-info magic 0x{mg:x}, code 0x{csize:x} bytes @ file 0x{len(d)-csize:
 PY
 [ -s "$TMP/code.bin" ] || exit 1
 
-# Optional flash1 image (e.g. partition.bin) loaded at the XIP base 0x90100000:
-# flashboot reads the partition table there and checks magic 0x4b87a52d — with it,
-# flashboot parses the partition table and runs ~940 instrs (4x) into its main path.
+# Optional flash1 image (partition.bin, or a full image from bs21-build-flash.sh)
+# loaded at the XIP base 0x90100000: flashboot reads the partition table there and
+# checks magic 0x4b87a52d. The QEMU generic loader caps a single raw load at
+# ~0x10000, so split the image into 0x10000-byte chunks.
 FLASH1_IMG="${4:-}"
 FLASH1_ARGS=()
-[ -n "$FLASH1_IMG" ] && FLASH1_ARGS=(-device "loader,file=$FLASH1_IMG,addr=0x90100000")
+if [ -n "$FLASH1_IMG" ]; then
+    CH=$((0x10000)); n=0; sz=$(stat -c%s "$FLASH1_IMG")
+    for ((o = 0; o < sz; o += CH)); do
+        dd if="$FLASH1_IMG" of="$TMP/f1_$n.bin" bs=1 skip=$o count=$CH 2>/dev/null
+        FLASH1_ARGS+=(-device "loader,file=$TMP/f1_$n.bin,addr=$((0x90100000 + o))")
+        n=$((n + 1))
+    done
+fi
 
 echo "==> booting $(basename "$IMG") at $ADDR on -M bs21 (${SECS}s)${FLASH1_IMG:+ + flash1 $(basename "$FLASH1_IMG")@0x90100000}"
 timeout "$SECS" "$QEMU_BIN" -M bs21 -nographic -serial mon:stdio \

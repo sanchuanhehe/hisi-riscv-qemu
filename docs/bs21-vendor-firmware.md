@@ -104,12 +104,19 @@ a0–a3, result in a0) and resume at `ra`.
    there gets flashboot **past the magic** and **~940 instrs** (4x) deep into its
    main path (partition parsing) before a new idle spin @0x4293a. Reproduce:
    `bs21-vendor-boot.sh flashboot_sign_a.bin 5 0x40000 partition.bin`.
-5. **App image + boot** — the next gate: the partition table points to firmware
-   partitions at flash offsets (0x1000/0xa000/0x88000/…); flashboot then validates
-   and loads the application from those offsets. Populating flash1 with the full
-   firmware (flashboot + app at their partition offsets) lets flashboot load + jump
-   to the app — but the app is the full LiteOS BLE/SLE image, so *running* it is the
-   broader connectivity work (all peripherals, the BLE/SLE stacks).
+5. ~~Full flash image~~ — DONE. `bs21-build-flash.sh` unpacks the fbb_bs2x
+   `bs21e_all.fwpkg` (loaderboot/partition/flashboot_a+b/**application**/nv) and lays
+   each out at its partition flash offset (app @0x15000 → XIP 0x90115000); the boot
+   script chunk-loads it at 0x90100000 (the generic loader caps a single raw load at
+   ~0x10000). flashboot loads with the full flash present.
+6. **Post-parse halt** — the current gate: flashboot **disables interrupts**
+   (mstatus=0, mie=0) and, after parsing the partition table (~940 instrs), reaches a
+   hard spin @0x4293a — and it runs the *same* 940 instrs with OR without the app in
+   flash, so it halts **before** reading/validating the app. The halt is a post-parse
+   condition (a boot-reason/peripheral check), not the app load. Finding what
+   flashboot checks there (and modelling it) is the next step before it would load +
+   jump to the app — after which *running* the LiteOS BLE/SLE app is the broader
+   connectivity work.
 
 The infrastructure (CPU + xlinx + memory map + UART/GPIO + the disjoint-range ROM
 dispatch + bs21_rom_call) is in place; both loaderboot and flashboot *run* — the
