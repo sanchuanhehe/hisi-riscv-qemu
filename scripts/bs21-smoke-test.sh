@@ -14,11 +14,26 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QEMU_DIR="${QEMU_DIR:-$HERE/qemu}"
 QEMU_BIN="${QEMU_BIN:-$QEMU_DIR/build/qemu-system-riscv32}"
-WS63_RS="${WS63_RS:-$HERE/../hisi-riscv-rs}"
-# BS21 examples are their own (chip-bs21) workspace; prefer release, fall back to debug.
-BASE="$WS63_RS/bs21-examples/target/riscv32imfc-unknown-none-elf"
-TARGET_DIR="$BASE/release"
-[ -d "$TARGET_DIR" ] || TARGET_DIR="$BASE/debug"
+# Umbrella checkout (renamed repo, or the older on-disk name). The BS21 examples
+# are their own (chip-bs21) workspace, grouped under examples/bs21 after the tree
+# regroup (older layout had them at the top level as bs21-examples).
+WS63_RS="${WS63_RS:-}"
+if [ -z "$WS63_RS" ]; then
+    for c in "$HERE/../hisi-riscv-rs" "$HERE/../ws63-rs"; do
+        [ -d "$c" ] && { WS63_RS="$c"; break; }
+    done
+    WS63_RS="${WS63_RS:-$HERE/../hisi-riscv-rs}"
+fi
+# Find the example target dir across both layouts (examples/bs21 | bs21-examples),
+# preferring release over debug.
+TARGET_DIR=""
+for sub in examples/bs21 bs21-examples; do
+    for prof in release debug; do
+        d="$WS63_RS/$sub/target/riscv32imfc-unknown-none-elf/$prof"
+        [ -f "$d/bs21_uart_hello" ] && { TARGET_DIR="$d"; break 2; }
+    done
+done
+: "${TARGET_DIR:=$WS63_RS/examples/bs21/target/riscv32imfc-unknown-none-elf/release}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

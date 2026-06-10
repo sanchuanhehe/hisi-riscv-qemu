@@ -242,10 +242,34 @@ a0–a3, result in a0) and resume at `ra`.
     completes. Modeling that status bit as "calibration done" (bit0=1) is the next step.
     (WS63 5/5 qtests ×4 QEMU versions + BS21 M1 unaffected by the decoder fix.)
 
+12. **32K-clock calibration status modelled → app passes the poll, runs further bring-up
+    (2026-06-10).** Added a small `bs21.clk32k` MMIO region over the GLB absorber at the
+    PMU2_CMU 32K-clock-detect block (`0x57008480`, size `0x20`): `DET_STS` (`+0x08` =
+    `0x57008488`) reads bit0=1 (DONE) / bit1=0 (not DOING), so `hal_32k_clock_get_detect_
+    result()`'s `while (!(STS & 1))` completes immediately; CFG/VAL enable writes are
+    no-ops. The detect result reads 0 — which is **safe**: `calibration_get_clock_frq()`
+    (clock_calibration.c:55) guards `if (result != 0)` before dividing, so on 0 it keeps
+    the default `g_clock_32k = 32768 Hz`. Verified the exact access sequence (WR VAL=0x40,
+    DOING-check, clr/set ENABLE, DONE-poll=1, read RES=0) — 9 accesses, no loop. With this
+    the app passes 0x901286b2 and runs **far more** init (memory pool, **LOS task
+    creation** at 0x90118xxx, registration tables, 0x90122/0x90126/0x90128xxx) before the
+    next blocker. **Next blocker:** the app enters a tight 20-PC ITCM loop (resident
+    boot-stage service code at 0x41/0x42/0x45xxx) that **polls a 2-bit field of
+    `0x570007a0`** (GLB_CTL_A region, via a descriptor-table register accessor) with TCXO
+    delays between reads, interleaved with ULP_AON config writes (`0x5702c934 = 0xc5`,
+    reads of `0x5702c330..340`). Our generic absorber returns 0, so the field never
+    reaches its ready value → infinite wait. This is the deeper **clock/power-domain
+    bring-up** (a PLL/clock-switch or LDO "ready" status); modeling `0x570007a0`'s ready
+    field correctly needs the BS2X GLB_CTL_A register map. (Also fixed `bs21-smoke-test.sh`
+    to find the examples under the post-regroup `examples/bs21` path — it had silently
+    SKIPped, a false PASS. WS63 5/5 qtests + BS21 M1 — uart_hello banner + 13 GPIO toggles,
+    0 illegal traps — both green.)
+
 The infrastructure (CPU + xlinx [now incl. prefd + the muliadd imm fix + the ldmia/stmia
 bank selector] + memory map + UART/GPIO + SFC + flash1 + the disjoint-range ROM dispatch
-+ bs21_rom_call + the mask-ROM signature + the TCXO fix + the GigaDevice flash ID) is in
-place; **flashboot loads + jumps to the app, and the LiteOS app runs its full kernel init
-(sections, memory pool, task create/resume, init-call levels) crash-free** — the BS2X
-vendor boot chain (loaderboot → flashboot → app) runs end-to-end on `-M bs21` into the
-application's hardware bring-up (now blocked on the 32K-clock calibration status poll).
++ bs21_rom_call + the mask-ROM signature + the TCXO fix + the GigaDevice flash ID + the
+32K-clock-detect status) is in place; **flashboot loads + jumps to the app, and the LiteOS
+app runs its full kernel init (sections, memory pool, task create/resume, init-call levels)
+crash-free, past the 32K-clock calibration** — the BS2X vendor boot chain (loaderboot →
+flashboot → app) runs end-to-end on `-M bs21` into the application's clock/power bring-up
+(now blocked on a GLB_CTL_A clock-ready status poll at `0x570007a0`).

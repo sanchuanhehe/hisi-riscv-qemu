@@ -117,6 +117,46 @@ struct BS21MachineState {
     MemoryRegion flash1;
     MemoryRegion ppb;
     MemoryRegion tcxo_win;
+    MemoryRegion clk32k;
+};
+
+/*
+ * PMU2_CMU 32K-clock calibration status (PMU2_CMU_CTL_RB_BASE 0x57008000).
+ * The vendor app's hal_32k_clock_get_detect_result() (hal_32k_clock.c) starts a
+ * calibration then spins:  while (!(*(u16*)0x57008488 & 1)) {}  — waiting for
+ * bit0 of HAL_CALIBRATION_32K_CLOCK_DET_STS (base + 0x488) to read 1 ("DONE").
+ * The generic GLB absorber returns 0, so the wait never completes. Model the
+ * calibration as instantaneously done: DET_STS reads DONE (bit0=1) and not
+ * in-progress (bit1 DOING=0); CFG/VAL enable writes are no-ops. The region is
+ * mapped at the DET block (0x57008480) so the rest of PMU2_CMU still falls to
+ * the absorber. (DET_RES_L/H read 0 for now — extend if a consumer needs them.)
+ */
+#define BS21_CLK32K_DET_BASE  0x57008480   /* PMU2_CMU + 0x480 (CFG/VAL/STS/RES) */
+#define BS21_CLK32K_DET_SIZE  0x00000020
+#define BS21_CLK32K_DET_STS   0x08         /* relative to BS21_CLK32K_DET_BASE */
+
+static uint64_t bs21_clk32k_read(void *opaque, hwaddr off, unsigned size)
+{
+    switch (off) {
+    case BS21_CLK32K_DET_STS:
+        return 0x1;   /* bit0 DET_DONE=1, bit1 DET_DOING=0 */
+    default:
+        return 0;
+    }
+}
+
+static void bs21_clk32k_write(void *opaque, hwaddr off, uint64_t val,
+                              unsigned size)
+{
+    /* calibration enable/cfg/cycle writes are no-ops — calibration is "done". */
+}
+
+static const MemoryRegionOps bs21_clk32k_ops = {
+    .read = bs21_clk32k_read,
+    .write = bs21_clk32k_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
 };
 
 static void bs21_cpu_reset(void *opaque)
@@ -198,6 +238,13 @@ static void bs21_machine_init(MachineState *machine)
     memory_region_init_alias(&s->tcxo_win, OBJECT(tcxo), "bs21.tcxo", tcxo_mr,
                              0, BS21_TCXO_SIZE);
     memory_region_add_subregion(sys, BS21_TCXO_BASE, &s->tcxo_win);
+
+    /* PMU2_CMU 32K-clock calibration status (over the GLB absorber) — reports the
+     * calibration as instantly done so the app's hal_32k_clock detect poll
+     * (while (!(*(u16*)0x57008488 & 1))) completes. See bs21_clk32k_ops above. */
+    memory_region_init_io(&s->clk32k, OBJECT(machine), &bs21_clk32k_ops, s,
+                          "bs21.clk32k", BS21_CLK32K_DET_SIZE);
+    memory_region_add_subregion(sys, BS21_CLK32K_DET_BASE, &s->clk32k);
 
     /* SFC serial-flash controller (shared v150 model) — models the SPI command
      * interface enough for flash identification (RDID -> JEDEC ID), so the vendor
