@@ -220,10 +220,32 @@ a0–a3, result in a0) and resume at `ra`.
     looks app/multi-core specific (`core:2` — likely the BT slave core) — the deeper
     app/connectivity layer. (WS63 5/5 qtests + BS21 M1 unaffected by the decoder fix.)
 
-The infrastructure (CPU + xlinx [now incl. prefd + the muliadd imm fix] + memory map +
-UART/GPIO + SFC + flash1 + the disjoint-range ROM dispatch + bs21_rom_call + the
-mask-ROM signature + the TCXO fix + the GigaDevice flash ID) is in place; **flashboot
-loads + jumps to the app, and the LiteOS app runs its full kernel init (sections,
-memory pool, task create/resume, init-call levels)** — the BS2X vendor boot chain
-(loaderboot → flashboot → app) runs end-to-end on `-M bs21` through the application's
-RTOS kernel init.
+11. **xlinx `ldmia`/`stmia` bank-selector bug fixed → the `core:2` "multi-core" halt
+    was an app CRASH, now gone (2026-06-10).** Verified first whether multi-core was
+    real: a BT slave core *does* exist (`slave_cpu_t{SLAVE_CPU_BT, SLAVE_CPU_MAX_NUM}`),
+    but the `APP|Reboot core:2` halt at 0x90126206 was **not** a multi-core boundary —
+    `core:2` is a hardcoded reboot-source code, and the path was reached via a
+    **NULL-pointer `memcpy`** whose source pointer had been clobbered. Root cause: a
+    third xlinx **decoder bug**. `ldmia/stmia` (opcode 0x0b) carries a 16-slot register
+    presence bitmap, and **bit31 selects which of two register banks** each slot maps to;
+    the old decoder only knew **bank 0** (`{ra,sp,s0,s1,a0,a1,s2..s11}`). LiteOS's
+    8-word `memcpy` block copy uses a **bank-1** list (`{ra,t0..t2,a0..a7,t3..t6}`), so
+    its `ldmia`/`stmia` decoded as bank-0 s-registers and **clobbered the caller's
+    `s0..s11`** → a later `memcpy(dst, s0=NULL, n)` → crash → the reboot path. Added the
+    bit31 bank selector + a `[2][16]` slot→GPR table (slot bits `7,8,9,10,11,20..30`),
+    derived and **validated 100% against 164 real `ldmia`/`stmia` from the firmware**
+    (96 bank-0 + 68 bank-1). With the fix the crash is gone (0 traps, mcause=0) and the
+    app advances past the reboot path into further init. **Next blocker:** the app now
+    spins on a **32K-clock calibration poll** at 0x901286b2 — `while (!(*(u16*)0x57008488
+    & 1))`, i.e. bit0 of `HAL_CALIBRATION_32K_CLOCK_DET_STS` (PMU2_CMU `0x57008000` +
+    `0x488`, `hal_32k_clock.c:18`); our generic absorber returns 0, so the wait never
+    completes. Modeling that status bit as "calibration done" (bit0=1) is the next step.
+    (WS63 5/5 qtests ×4 QEMU versions + BS21 M1 unaffected by the decoder fix.)
+
+The infrastructure (CPU + xlinx [now incl. prefd + the muliadd imm fix + the ldmia/stmia
+bank selector] + memory map + UART/GPIO + SFC + flash1 + the disjoint-range ROM dispatch
++ bs21_rom_call + the mask-ROM signature + the TCXO fix + the GigaDevice flash ID) is in
+place; **flashboot loads + jumps to the app, and the LiteOS app runs its full kernel init
+(sections, memory pool, task create/resume, init-call levels) crash-free** — the BS2X
+vendor boot chain (loaderboot → flashboot → app) runs end-to-end on `-M bs21` into the
+application's hardware bring-up (now blocked on the 32K-clock calibration status poll).

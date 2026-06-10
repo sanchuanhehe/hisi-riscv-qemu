@@ -236,37 +236,50 @@ static bool trans_xlinx_pushpop(DisasContext *ctx, uint16_t insn)
 }
 
 /*
- * ldmia/stmia {ra,s0-s11},(base) : multi-register load/store, ascending
- * addresses, no base writeback. opcode 0x0b, bit12: 0 load / 1 store.
- * Register-presence bitmask (ascending address order below).
+ * ldmia/stmia {reglist},(base) : multi-register load/store, ascending addresses,
+ * no base writeback. opcode 0x0b, bit12: 0 load / 1 store, base = rs1[19:15].
+ *
+ * The register list is a presence bitmap over a FIXED set of 16 slots (instruction
+ * bits 7,8,9,10,11 then 20,21,...,30, processed in that ascending-address order),
+ * and bit31 is a BANK selector choosing which register each slot maps to:
+ *   slot bit:   7   8   9   10  11 | 20  21  22  23  24  25  26  27  28  29  30
+ *   bank0(b31=0): ra sp  s0  s1  a0 | a1  s2  s3  s4  s5  s6  s7  s8  s9 s10 s11
+ *   bank1(b31=1): ra t0  t1  t2  a0 | a1  a2  a3  a4  a5  a6  a7  t3  t4  t5  t6
+ * (ra/a0/a1 are shared; the rest differ per bank.) Derived + validated against
+ * 164 real ldmia/stmia from the BS2X firmware (all match exactly). The previous
+ * map only knew the bank-0 s-registers, so a bank-1 list like {t1-t6,a6-a7} (the
+ * LiteOS memcpy's 8-word block copy) decoded as s-registers and clobbered the
+ * caller's s0..s11 -> a NULL-pointer crash deep in the app's init.
  */
 static bool trans_xlinx_ldmstm(DisasContext *ctx, uint32_t insn)
 {
-    static const struct { int ibit; int reg; } map[] = {
-        {  7,  1 },                         /* ra      */
-        {  9,  8 }, { 10,  9 },             /* s0, s1  */
-        { 21, 18 }, { 22, 19 }, { 23, 20 }, /* s2..s4  */
-        { 24, 21 }, { 25, 22 }, { 26, 23 }, /* s5..s7  */
-        { 27, 24 }, { 28, 25 }, { 29, 26 }, /* s8..s10 */
-        { 30, 27 },                         /* s11     */
+    static const int slot_bit[16] = {
+        7, 8, 9, 10, 11, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
     };
+    /* [bank][slot] -> GPR number */
+    static const int slot_reg[2][16] = {
+        /* bank 0 */ {  1,  2,  8,  9, 10, 11, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27 },
+        /* bank 1 */ {  1,  5,  6,  7, 10, 11, 12, 13, 14, 15, 16, 17, 28, 29, 30, 31 },
+    };
+    int bank = (insn >> 31) & 0x1;
     bool is_store = (insn >> 12) & 0x1;
     MemOp memop = MO_TEUL;
     TCGv addr = tcg_temp_new();
     int i, count = 0;
 
     tcg_gen_mov_tl(addr, get_gpr(ctx, xlinx_rs1(insn), EXT_NONE));
-    for (i = 0; i < (int)ARRAY_SIZE(map); i++) {
-        if (!(insn & (1u << map[i].ibit))) {
+    for (i = 0; i < 16; i++) {
+        int reg = slot_reg[bank][i];
+        if (!(insn & (1u << slot_bit[i]))) {
             continue;
         }
         if (is_store) {
-            TCGv val = get_gpr(ctx, map[i].reg, EXT_NONE);
+            TCGv val = get_gpr(ctx, reg, EXT_NONE);
             tcg_gen_qemu_st_tl(val, addr, ctx->mem_idx, memop);
         } else {
-            TCGv dest = dest_gpr(ctx, map[i].reg);
+            TCGv dest = dest_gpr(ctx, reg);
             tcg_gen_qemu_ld_tl(dest, addr, ctx->mem_idx, memop);
-            gen_set_gpr(ctx, map[i].reg, dest);
+            gen_set_gpr(ctx, reg, dest);
         }
         tcg_gen_addi_tl(addr, addr, 4);
         count++;
