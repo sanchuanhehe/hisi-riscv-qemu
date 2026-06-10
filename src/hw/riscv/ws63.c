@@ -110,7 +110,12 @@
 #define WS63_IRQ_DMA        59
 #define WS63_IRQ_LSADC      72
 #define WS63_IRQ_MAX        73
-#define WS63_MIE_IRQ_LO     26
+/* Lines 0..31 are delivered on the CPU's mip (standard vectored mtvec); >=32 are
+ * the custom LOCI interrupts. WS63 only wires peripherals at 26..31 (+ LOCI), but
+ * BS21's LiteOS tick uses the standard machine-timer interrupt MTIP = mip bit 7
+ * (TIMER_3 routed to it), so the mip range must include the low bits too. WS63
+ * uses none of lines 0..25, so widening the range is a no-op for it. */
+#define WS63_MIE_IRQ_LO     0
 #define WS63_MIE_IRQ_HI     31
 
 /* Custom CSRs (arch_encoding.h): LOCIPRI 0xBC0.., LOCIEN 0xBE0.., LOCIPCLR 0xBF0. */
@@ -464,15 +469,19 @@ OBJECT_DECLARE_SIMPLE_TYPE(WS63TimerState, WS63_TIMER)
 #define TMR_CONTROL_ONESHOT (1u << 1)   /* mode[2:1]==01 */
 #define TMR_CONTROL_MASK    (1u << 3)
 
+/* dw_apb timer: WS63 uses 3 channels (TIMER_0..2); BS21 has a 4th (TIMER_3 @
+ * +0x400) that drives the LiteOS tick. Model 4 — the extra channel is inert on
+ * WS63 (never enabled, raw_intr stays 0, so the global status bit 3 reads 0). */
+#define WS63_TIMER_CHANNELS 4
 struct WS63TimerState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
-    qemu_irq irq[3];
-    QEMUTimer *qt[3];
-    uint32_t load[3];
-    uint32_t control[3];
-    uint32_t raw_intr[3];
-    int64_t  start_ns[3];
+    qemu_irq irq[WS63_TIMER_CHANNELS];
+    QEMUTimer *qt[WS63_TIMER_CHANNELS];
+    uint32_t load[WS63_TIMER_CHANNELS];
+    uint32_t control[WS63_TIMER_CHANNELS];
+    uint32_t raw_intr[WS63_TIMER_CHANNELS];
+    int64_t  start_ns[WS63_TIMER_CHANNELS];
 };
 
 /*
@@ -567,7 +576,7 @@ static void ws63_timer_tick(void *opaque)
 }
 
 /* per-channel opaque: a small 2-pointer array {state, index} */
-static void *ws63_timer_chan_ctx[3][2];
+static void *ws63_timer_chan_ctx[WS63_TIMER_CHANNELS][2];
 
 static uint32_t ws63_timer_current(WS63TimerState *s, unsigned i)
 {
@@ -592,7 +601,7 @@ static uint64_t ws63_timer_read(void *opaque, hwaddr off, unsigned size)
 
     if (off == 0x7C || off == 0x80) { /* global raw / masked status */
         uint32_t v = 0;
-        for (unsigned i = 0; i < 3; i++) {
+        for (unsigned i = 0; i < WS63_TIMER_CHANNELS; i++) {
             uint32_t bit = (off == 0x7C) ? s->raw_intr[i]
                 : (s->raw_intr[i] && !(s->control[i] & TMR_CONTROL_MASK));
             v |= (bit ? 1u : 0u) << i;
@@ -600,13 +609,13 @@ static uint64_t ws63_timer_read(void *opaque, hwaddr off, unsigned size)
         return v;
     }
     if (off == 0x78) { /* EOI_REN: read clears all */
-        for (unsigned i = 0; i < 3; i++) {
+        for (unsigned i = 0; i < WS63_TIMER_CHANNELS; i++) {
             s->raw_intr[i] = 0;
             ws63_timer_update_irq(s, i);
         }
         return 0;
     }
-    if (off >= 0x100 && off < 0x400) {
+    if (off >= 0x100 && off < 0x500) {
         unsigned i = (off >> 8) - 1;
         unsigned r = off & 0xFF;
         switch (r) {
@@ -631,13 +640,13 @@ static void ws63_timer_write(void *opaque, hwaddr off, uint64_t val,
     WS63TimerState *s = opaque;
 
     if (off == 0x78) { /* EOI_REN: write clears all */
-        for (unsigned i = 0; i < 3; i++) {
+        for (unsigned i = 0; i < WS63_TIMER_CHANNELS; i++) {
             s->raw_intr[i] = 0;
             ws63_timer_update_irq(s, i);
         }
         return;
     }
-    if (off >= 0x100 && off < 0x400) {
+    if (off >= 0x100 && off < 0x500) {
         unsigned i = (off >> 8) - 1;
         unsigned r = off & 0xFF;
         switch (r) {
@@ -677,7 +686,7 @@ static void ws63_timer_realize(DeviceState *dev, Error **errp)
 {
     WS63TimerState *s = WS63_TIMER(dev);
     g_ws63_timer = s;                   /* for clock-gate re-arm from CLDO_CRG */
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < WS63_TIMER_CHANNELS; i++) {
         ws63_timer_chan_ctx[i][0] = (void *)s;
         ws63_timer_chan_ctx[i][1] = (void *)(uintptr_t)i;
         s->qt[i] = timer_new_ns(QEMU_CLOCK_VIRTUAL, ws63_timer_tick,
@@ -692,7 +701,7 @@ static void ws63_timer_instance_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ws63_timer_ops, s,
                           TYPE_WS63_TIMER, WS63_TIMER_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < WS63_TIMER_CHANNELS; i++) {
         sysbus_init_irq(sbd, &s->irq[i]);
     }
 }

@@ -101,7 +101,11 @@
 #define BS21_IRQ_UART0      39   /* UART_0 */
 #define BS21_IRQ_UART1      41   /* UART_1 */
 #define BS21_IRQ_UART2      42   /* UART_2 */
-#define BS21_IRQ_TIMER0     53   /* TIMER_0..3 = 53..56 */
+#define BS21_IRQ_TIMER0     53   /* TIMER_0..3 = 53..56 (general-purpose) */
+/* The LiteOS tick (tick_timer.c) drives TIMER_3 but routes its interrupt to the
+ * standard RISC-V machine-timer interrupt MTIP = mip bit 7 (OS_TICK_INT_NUM 7,
+ * which is < LOCAL_INTERRUPT0 26 so it is a core, not LOCI, interrupt). */
+#define BS21_IRQ_TICK       7    /* MTIP (mip bit 7) — TIMER_3 -> LiteOS tick */
 
 #define TYPE_BS21_MACHINE MACHINE_TYPE_NAME("bs21")
 OBJECT_DECLARE_SIMPLE_TYPE(BS21MachineState, BS21_MACHINE)
@@ -366,7 +370,8 @@ static void bs21_machine_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(sfc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(sfc), 0, BS21_SFC_BASE);
 
-    /* TIMER0..3 (shared model; IRQ 53..). The model exposes 3 channels. */
+    /* TIMER0..3 (shared model, 4 channels). TIMER_0..2 -> general LOCI IRQs
+     * 53..55; TIMER_3 (the LiteOS tick) -> MTIP (mip bit 7). */
     DeviceState *timer = qdev_new(TYPE_WS63_TIMER);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(timer), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(timer), 0, BS21_TIMER_BASE);
@@ -374,6 +379,8 @@ static void bs21_machine_init(MachineState *machine)
         sysbus_connect_irq(SYS_BUS_DEVICE(timer), i,
                            qdev_get_gpio_in(intc, BS21_IRQ_TIMER0 + i));
     }
+    sysbus_connect_irq(SYS_BUS_DEVICE(timer), 3,
+                       qdev_get_gpio_in(intc, BS21_IRQ_TICK));
 
     /* One GPIO bank (GPIO0 @ 0x57010000, IRQ 34). BS21 has 5 banks; M1 blinky
      * uses GPIO0 pin 0, so one bank suffices. */
