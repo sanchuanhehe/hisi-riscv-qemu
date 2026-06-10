@@ -65,4 +65,12 @@ void ws63_tcxo_set_chunked16(DeviceState *dev, bool chunked16);
  * W25Q16). bs21.c sets the GigaDevice ID the BS2X flashboot expects. */
 void ws63_sfc_set_flash_id(DeviceState *dev, uint32_t id);
 
+/* Create + map a DesignWare-SSI SPI controller model with TX->RX loopback at
+ * @base (its TX FIFO is looped back to RX, so a blocking transfer reads back what
+ * it wrote — same model WS63 uses for spi0/spi1). BS2X's SPI is the same v151 IP
+ * as WS63's, so this lets the bs2x machines functionally exercise the (now
+ * chip-bs21-enabled) Rust SPI driver. Realizes the device and maps it into system
+ * memory; returns it. */
+DeviceState *ws63_create_spi_loopback(hwaddr base);
+
 #endif /* HW_RISCV_HISI_RISCV31_H */

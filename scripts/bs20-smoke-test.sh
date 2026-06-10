@@ -87,5 +87,22 @@ else
     echo "==> bs2x blinky: SKIP (build it: cargo build --manifest-path examples/bs21/Cargo.toml --release)"
 fi
 
+
+# ---- spi_loopback: DesignWare-SSI v151 driver round-trip (loopback model @0x52087000) ----
+SPI_ELF="$TARGET_DIR/bs20_spi_loopback"
+if [ -f "$SPI_ELF" ]; then
+    echo "==> bs20 spi_loopback on -M bs20: expecting SPI0 TX->RX loopback (chip-bs21 SPI driver)"
+    timeout 5 "$QEMU_BIN" -M bs20 -nographic -serial mon:stdio \
+        -kernel "$SPI_ELF" >"$TMP/spi.out" 2>/dev/null
+    if grep -q "SPI loopback OK" "$TMP/spi.out"; then
+        echo "    PASS: $(grep -m1 'SPI loopback' "$TMP/spi.out")"
+    else
+        echo "    FAIL: SPI loopback not OK. Got:"; grep -a SPI "$TMP/spi.out" | sed 's/^/      /'
+        fail=1
+    fi
+else
+    echo "==> bs20 spi_loopback: SKIP (build examples/bs20/Cargo.toml --release)"
+fi
+
 [ "$fail" -eq 0 ] && echo "BS20 SMOKE TEST: PASS" || echo "BS20 SMOKE TEST: FAIL"
 exit "$fail"

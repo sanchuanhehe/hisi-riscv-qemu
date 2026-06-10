@@ -95,6 +95,7 @@
 #define BS22_GPIO0_BASE     0x57010000
 #define BS22_TCXO_BASE      0x57000200
 #define BS22_TCXO_SIZE      0x00000200   /* TCXO_COUNT block; GLB_CTL_A @0x57000400 */
+#define BS22_SPI0_BASE      0x52087000   /* SPI_M0 (DesignWare SSI v151) */
 
 /* IRQ numbers (chip_core_irq.h, shared across BS2X). 26-31 use standard mie bits;
  * >=32 are LOCI. */
@@ -197,6 +198,10 @@ static void bs22_machine_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(gpio), 0, BS22_GPIO0_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(gpio), 0,
                        qdev_get_gpio_in(intc, BS22_IRQ_GPIO0));
+
+    /* SPI0 (DesignWare SSI v151) TX->RX loopback — functionally exercises the
+     * chip-bs21 Rust SPI driver (spi_loopback example). */
+    ws63_create_spi_loopback(BS22_SPI0_BASE);
 
     /* UART0/1/2 (custom device on top of the absorber). */
     const hwaddr uart_base[3] = { BS22_UART0_BASE, BS22_UART1_BASE, BS22_UART2_BASE };
