@@ -79,4 +79,9 @@ DeviceState *ws63_create_spi_loopback(hwaddr base);
  * AON iso) falls to the GLB absorber — the driver never polls it. */
 void ws63_create_gadc(hwaddr base);
 
+/* Map a DesignWare I2C (v151) master model with one slave (@0x50) at @base, so the
+ * chip-bs21 Rust I2C driver's bus scan finds exactly one device (present = ACK /
+ * STOP_DET; absent = TX_ABRT + addr_7b_noack). */
+void ws63_create_i2c(hwaddr base);
+
 #endif /* HW_RISCV_HISI_RISCV31_H */

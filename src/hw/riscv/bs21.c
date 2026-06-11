@@ -96,6 +96,7 @@
 #define BS21_SFC_BASE       0x90000000   /* serial-flash controller regs (v150) */
 #define BS21_SPI0_BASE      0x52087000   /* SPI_M0 (DesignWare SSI v151) */
 #define BS21_GADC_BASE      0x57036000   /* GADC digital block (13-bit ADC v153) */
+#define BS21_I2C0_BASE      0x52083000   /* I2C0 (DesignWare SSI v151) */
 
 /* IRQ numbers (chip_core_irq.h). 26-31 use standard mie bits; >=32 are LOCI.
  * (BS21's 26-29 are BT/ADC, unlike WS63 where they are TIMER.) */
@@ -400,6 +401,10 @@ static void bs21_machine_init(MachineState *machine)
     /* GADC (13-bit ADC v153) digital block — functionally exercises the chip-bs21
      * Rust gadc driver (gadc_read example). */
     ws63_create_gadc(BS21_GADC_BASE);
+
+    /* I2C0 (DesignWare SSI v151) with one slave @0x50 — exercises the chip-bs21
+     * Rust i2c driver's bus scan (i2c_scan example). */
+    ws63_create_i2c(BS21_I2C0_BASE);
 
     /* UART0/1/2 (custom device on top of the absorber). */
     const hwaddr uart_base[3] = { BS21_UART0_BASE, BS21_UART1_BASE, BS21_UART2_BASE };

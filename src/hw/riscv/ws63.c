@@ -1627,6 +1627,106 @@ void ws63_create_gadc(hwaddr base)
     memory_region_add_subregion(get_system_memory(), base, mr);
 }
 
+/* ============================================================================
+ * BS2X I2C (DesignWare SSI, v151) master model with ONE slave on the bus, so the
+ * chip-bs21 Rust `i2c` driver's bus scan finds exactly one device. A transfer
+ * (write to IC_DATA_CMD 0x1C) targeting IC_TAR == WS63_I2C_SLAVE_ADDR completes
+ * (STOP_DET, and a read returns WS63_I2C_SLAVE_DATA); any other address aborts
+ * (TX_ABRT + addr_7b_noack), which is how the driver tells present from absent.
+ * ========================================================================== */
+#define WS63_I2C_SLAVE_ADDR  0x50
+#define WS63_I2C_SLAVE_DATA  0xA5
+#define I2C_IC_TAR_OFF       0x10
+#define I2C_IC_DATA_CMD_OFF  0x1C
+#define I2C_IC_STATUS_OFF    0x60
+#define I2C_IC_RXFLR_OFF     0x68
+#define I2C_IC_ABRT_SLV_OFF  0x7C
+#define I2C_IC_RAW_INTR_OFF  0xB8
+#define I2C_IC_CLR_INTR_OFF  0xC0
+#define I2C_IC_CLR_INT_OFF   0xC4
+#define I2C_RAW_TX_ABRT      (1u << 6)
+#define I2C_RAW_STOP_DET     (1u << 9)
+
+typedef struct {
+    uint32_t ic_tar;
+    uint32_t raw_intr;   /* bit6 tx_abrt, bit9 stop_det */
+    uint32_t abrt_slv;   /* bit0 addr_7b_noack */
+    uint8_t  rx_byte;
+    bool     rx_valid;
+} WS63I2cState;
+
+static uint64_t ws63_i2c_read(void *opaque, hwaddr off, unsigned size)
+{
+    WS63I2cState *s = opaque;
+    switch (off) {
+    case I2C_IC_STATUS_OFF:
+        /* tfnf(1)|tfe(2) always ready; rfne(3) when a byte is waiting. */
+        return 0x6 | (s->rx_valid ? 0x8 : 0);
+    case I2C_IC_RAW_INTR_OFF:
+        return s->raw_intr;
+    case I2C_IC_ABRT_SLV_OFF:
+        return s->abrt_slv;
+    case I2C_IC_RXFLR_OFF:
+        return s->rx_valid ? 1 : 0;
+    case I2C_IC_DATA_CMD_OFF: {
+        uint8_t b = s->rx_byte;
+        s->rx_valid = false;
+        return b;
+    }
+    case I2C_IC_CLR_INTR_OFF:
+    case I2C_IC_CLR_INT_OFF:
+        /* read-to-clear all interrupts + the abort source. */
+        s->raw_intr = 0;
+        s->abrt_slv = 0;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static void ws63_i2c_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
+{
+    WS63I2cState *s = opaque;
+    switch (off) {
+    case I2C_IC_TAR_OFF:
+        s->ic_tar = val & 0x3FF;
+        break;
+    case I2C_IC_DATA_CMD_OFF:
+        if ((s->ic_tar & 0x7F) == WS63_I2C_SLAVE_ADDR) {
+            s->raw_intr |= I2C_RAW_STOP_DET;        /* device ACKed */
+            if (val & (1u << 8)) {                  /* cmd bit = read */
+                s->rx_byte = WS63_I2C_SLAVE_DATA;
+                s->rx_valid = true;
+            }
+        } else {
+            s->raw_intr |= I2C_RAW_TX_ABRT;         /* address NACK */
+            s->abrt_slv |= 1u;                      /* addr_7b_noack */
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ws63_i2c_ops = {
+    .read = ws63_i2c_read,
+    .write = ws63_i2c_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+/* Shared helper (declared in hisi_riscv31.h): map a DesignWare I2C master model
+ * (with one slave @0x50) at @base, for the bs2x machines to exercise the Rust I2C
+ * driver's bus scan. */
+void ws63_create_i2c(hwaddr base)
+{
+    WS63I2cState *s = g_new0(WS63I2cState, 1);
+    MemoryRegion *mr = g_new0(MemoryRegion, 1);
+    memory_region_init_io(mr, NULL, &ws63_i2c_ops, s, "bs2x.i2c", 0x1000);
+    memory_region_add_subregion(get_system_memory(), base, mr);
+}
+
 /* peripheral instance table (base, kind, window size, name, irq) — from WS63.svd.
  * irq != 0 is connected to the intc (the device raises it via qemu_set_irq). */
 static const struct {

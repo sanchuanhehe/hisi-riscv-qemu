@@ -97,6 +97,7 @@
 #define BS20_TCXO_SIZE      0x00000200   /* TCXO_COUNT block; GLB_CTL_A @0x57000400 */
 #define BS20_SPI0_BASE      0x52087000   /* SPI_M0 (DesignWare SSI v151) */
 #define BS20_GADC_BASE      0x57036000   /* GADC digital block (13-bit ADC v153) */
+#define BS20_I2C0_BASE      0x52083000   /* I2C0 (DesignWare SSI v151) */
 
 /* IRQ numbers (chip_core_irq.h, shared across BS2X). 26-31 use standard mie bits;
  * >=32 are LOCI. */
@@ -207,6 +208,10 @@ static void bs20_machine_init(MachineState *machine)
     /* GADC (13-bit ADC v153) digital block — functionally exercises the chip-bs21
      * Rust gadc driver (gadc_read example). */
     ws63_create_gadc(BS20_GADC_BASE);
+
+    /* I2C0 (DesignWare SSI v151) with one slave @0x50 — exercises the chip-bs21
+     * Rust i2c driver's bus scan (i2c_scan example). */
+    ws63_create_i2c(BS20_I2C0_BASE);
 
     /* UART0/1/2 (custom device on top of the absorber). */
     const hwaddr uart_base[3] = { BS20_UART0_BASE, BS20_UART1_BASE, BS20_UART2_BASE };

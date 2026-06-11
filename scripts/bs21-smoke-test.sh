@@ -113,5 +113,22 @@ else
     echo "==> bs21 gadc_read: SKIP"
 fi
 
+
+# ---- i2c_scan: BS2X DesignWare I2C (v151) driver bus scan (one slave @0x50) ----
+I2C_ELF="$TARGET_DIR/bs21_i2c_scan"
+if [ -f "$I2C_ELF" ]; then
+    echo "==> bs21 i2c_scan on -M bs21: expecting a bus scan to find I2C0 slave 0x50"
+    timeout 6 "$QEMU_BIN" -M bs21 -nographic -serial mon:stdio \
+        -kernel "$I2C_ELF" >"$TMP/i2c.out" 2>/dev/null
+    if grep -q "I2C scan OK" "$TMP/i2c.out"; then
+        echo "    PASS: $(grep -m1 'found device' "$TMP/i2c.out")"
+    else
+        echo "    FAIL: I2C scan not OK. Got:"; grep -a I2C "$TMP/i2c.out" | sed 's/^/      /'
+        fail=1
+    fi
+else
+    echo "==> bs21 i2c_scan: SKIP"
+fi
+
 [ "$fail" -eq 0 ] && echo "BS21 SMOKE TEST: PASS" || echo "BS21 SMOKE TEST: FAIL"
 exit "$fail"
