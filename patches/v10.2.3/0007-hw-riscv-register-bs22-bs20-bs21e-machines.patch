@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ws63-rs <noreply@anthropic.com>
+Date: Thu, 12 Jun 2026 20:30:00 +0800
+Subject: [PATCH] hw/riscv: register + adapt the BS22 / BS20 / BS21E machines (BS2X family)
+
+Bring this series to v10.0.0 parity for the BS2X machine set. hw/riscv/{bs22,
+bs20,bs21e}.c are copied into the tree by scripts/build.sh; register them
+(Kconfig CONFIG_BS22/BS20/BS21E + meson) and apply the same per-version #include
+compat this series already applies to bs21.c (the clones share its include block).
+They reuse ws63.c's shared device models via hisi_riscv31.h (CONFIG_BS2x selects
+CONFIG_WS63). bs21/bs21e/bs22 are 160K and register-identical; bs20 is the 128K
+fork. Registers -M bs22 / -M bs20 / -M bs21e (clean M1 + functional peripherals).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
+index eb0733d..417a2ce 100644
+--- a/hw/riscv/Kconfig
++++ b/hw/riscv/Kconfig
+@@ -133,6 +133,27 @@ config BS21
+     select UNIMP
+     select WS63
+ 
++config BS22
++    bool
++    default y
++    depends on RISCV32
++    select UNIMP
++    select WS63
++
++config BS20
++    bool
++    default y
++    depends on RISCV32
++    select UNIMP
++    select WS63
++
++config BS21E
++    bool
++    default y
++    depends on RISCV32
++    select UNIMP
++    select WS63
++
+ config XIANGSHAN_KUNMINGHU
+     bool
+     default y
+diff --git a/hw/riscv/bs20.c b/hw/riscv/bs20.c
+index d4ad34f..70b2553 100644
+--- a/hw/riscv/bs20.c
++++ b/hw/riscv/bs20.c
+@@ -47,7 +47,7 @@
+ #include "hw/core/cpu.h"
+ #include "system/system.h"
+ #include "system/reset.h"
+-#include "exec/address-spaces.h"
++#include "system/address-spaces.h"
+ #include "elf.h"
+ #include "hisi_riscv31.h" /* shared HiSilicon riscv31 device models (impl: ws63.c) */
+ 
+diff --git a/hw/riscv/bs21e.c b/hw/riscv/bs21e.c
+index 322783f..cfcf7ff 100644
+--- a/hw/riscv/bs21e.c
++++ b/hw/riscv/bs21e.c
+@@ -50,7 +50,7 @@
+ #include "hw/core/cpu.h"
+ #include "system/system.h"
+ #include "system/reset.h"
+-#include "exec/address-spaces.h"
++#include "system/address-spaces.h"
+ #include "elf.h"
+ #include "hisi_riscv31.h" /* shared HiSilicon riscv31 device models (impl: ws63.c) */
+ 
+diff --git a/hw/riscv/bs22.c b/hw/riscv/bs22.c
+index 13ad838..6d1e660 100644
+--- a/hw/riscv/bs22.c
++++ b/hw/riscv/bs22.c
+@@ -47,7 +47,7 @@
+ #include "hw/core/cpu.h"
+ #include "system/system.h"
+ #include "system/reset.h"
+-#include "exec/address-spaces.h"
++#include "system/address-spaces.h"
+ #include "elf.h"
+ #include "hisi_riscv31.h" /* shared HiSilicon riscv31 device models (impl: ws63.c) */
+ 
+diff --git a/hw/riscv/meson.build b/hw/riscv/meson.build
+index 5e0fb1a..b233edb 100644
+--- a/hw/riscv/meson.build
++++ b/hw/riscv/meson.build
+@@ -17,4 +17,7 @@ riscv_ss.add(when: 'CONFIG_XIANGSHAN_KUNMINGHU', if_true: files('xiangshan_kmh.c
+ 
+ riscv_ss.add(when: 'CONFIG_WS63', if_true: files('ws63.c'))
+ riscv_ss.add(when: 'CONFIG_BS21', if_true: files('bs21.c'))
++riscv_ss.add(when: 'CONFIG_BS22', if_true: files('bs22.c'))
++riscv_ss.add(when: 'CONFIG_BS20', if_true: files('bs20.c'))
++riscv_ss.add(when: 'CONFIG_BS21E', if_true: files('bs21e.c'))
+ hw_arch += {'riscv': riscv_ss}

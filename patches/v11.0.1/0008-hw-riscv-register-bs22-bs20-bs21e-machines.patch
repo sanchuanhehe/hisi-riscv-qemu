@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ws63-rs <noreply@anthropic.com>
+Date: Thu, 12 Jun 2026 20:30:00 +0800
+Subject: [PATCH] hw/riscv: register + adapt the BS22 / BS20 / BS21E machines (BS2X family)
+
+Bring this series to v10.0.0 parity for the BS2X machine set. hw/riscv/{bs22,
+bs20,bs21e}.c are copied into the tree by scripts/build.sh; register them
+(Kconfig CONFIG_BS22/BS20/BS21E + meson) and apply the same per-version #include
+compat this series already applies to bs21.c (the clones share its include block).
+They reuse ws63.c's shared device models via hisi_riscv31.h (CONFIG_BS2x selects
+CONFIG_WS63). bs21/bs21e/bs22 are 160K and register-identical; bs20 is the 128K
+fork. Registers -M bs22 / -M bs20 / -M bs21e (clean M1 + functional peripherals).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+diff --git a/hw/riscv/Kconfig b/hw/riscv/Kconfig
+index a270daa..49642d0 100644
+--- a/hw/riscv/Kconfig
++++ b/hw/riscv/Kconfig
+@@ -133,6 +133,27 @@ config BS21
+     select UNIMP
+     select WS63
+ 
++config BS22
++    bool
++    default y
++    depends on RISCV32
++    select UNIMP
++    select WS63
++
++config BS20
++    bool
++    default y
++    depends on RISCV32
++    select UNIMP
++    select WS63
++
++config BS21E
++    bool
++    default y
++    depends on RISCV32
++    select UNIMP
++    select WS63
++
+ config XIANGSHAN_KUNMINGHU
+     bool
+     default y
+diff --git a/hw/riscv/bs20.c b/hw/riscv/bs20.c
+index d4ad34f..b53e4e6 100644
+--- a/hw/riscv/bs20.c
++++ b/hw/riscv/bs20.c
+@@ -35,19 +35,19 @@
+ #include "qemu/osdep.h"
+ #include "qemu/error-report.h"
+ #include "qapi/error.h"
+-#include "hw/boards.h"
+-#include "hw/loader.h"
+-#include "hw/sysbus.h"
+-#include "hw/irq.h"
+-#include "hw/qdev-properties.h"
+-#include "hw/qdev-properties-system.h"
++#include "hw/core/boards.h"
++#include "hw/core/loader.h"
++#include "hw/core/sysbus.h"
++#include "hw/core/irq.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
+ #include "hw/misc/unimp.h"
+ #include "chardev/char.h"
+ #include "target/riscv/cpu.h"
+ #include "hw/core/cpu.h"
+ #include "system/system.h"
+ #include "system/reset.h"
+-#include "exec/address-spaces.h"
++#include "system/address-spaces.h"
+ #include "elf.h"
+ #include "hisi_riscv31.h" /* shared HiSilicon riscv31 device models (impl: ws63.c) */
+ 
+diff --git a/hw/riscv/bs21e.c b/hw/riscv/bs21e.c
+index 322783f..80dbf0a 100644
+--- a/hw/riscv/bs21e.c
++++ b/hw/riscv/bs21e.c
+@@ -38,19 +38,19 @@
+ #include "qemu/osdep.h"
+ #include "qemu/error-report.h"
+ #include "qapi/error.h"
+-#include "hw/boards.h"
+-#include "hw/loader.h"
+-#include "hw/sysbus.h"
+-#include "hw/irq.h"
+-#include "hw/qdev-properties.h"
+-#include "hw/qdev-properties-system.h"
++#include "hw/core/boards.h"
++#include "hw/core/loader.h"
++#include "hw/core/sysbus.h"
++#include "hw/core/irq.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
+ #include "hw/misc/unimp.h"
+ #include "chardev/char.h"
+ #include "target/riscv/cpu.h"
+ #include "hw/core/cpu.h"
+ #include "system/system.h"
+ #include "system/reset.h"
+-#include "exec/address-spaces.h"
++#include "system/address-spaces.h"
+ #include "elf.h"
+ #include "hisi_riscv31.h" /* shared HiSilicon riscv31 device models (impl: ws63.c) */
+ 
+diff --git a/hw/riscv/bs22.c b/hw/riscv/bs22.c
+index 13ad838..b08aa15 100644
+--- a/hw/riscv/bs22.c
++++ b/hw/riscv/bs22.c
+@@ -35,19 +35,19 @@
+ #include "qemu/osdep.h"
+ #include "qemu/error-report.h"
+ #include "qapi/error.h"
+-#include "hw/boards.h"
+-#include "hw/loader.h"
+-#include "hw/sysbus.h"
+-#include "hw/irq.h"
+-#include "hw/qdev-properties.h"
+-#include "hw/qdev-properties-system.h"
++#include "hw/core/boards.h"
++#include "hw/core/loader.h"
++#include "hw/core/sysbus.h"
++#include "hw/core/irq.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
+ #include "hw/misc/unimp.h"
+ #include "chardev/char.h"
+ #include "target/riscv/cpu.h"
+ #include "hw/core/cpu.h"
+ #include "system/system.h"
+ #include "system/reset.h"
+-#include "exec/address-spaces.h"
++#include "system/address-spaces.h"
+ #include "elf.h"
+ #include "hisi_riscv31.h" /* shared HiSilicon riscv31 device models (impl: ws63.c) */
+ 
+diff --git a/hw/riscv/meson.build b/hw/riscv/meson.build
+index 84f2a96..010dab4 100644
+--- a/hw/riscv/meson.build
++++ b/hw/riscv/meson.build
+@@ -20,4 +20,7 @@ riscv_ss.add(when: 'CONFIG_MIPS_BOSTON_AIA', if_true: files('boston-aia.c'))
+ 
+ riscv_ss.add(when: 'CONFIG_WS63', if_true: files('ws63.c'))
+ riscv_ss.add(when: 'CONFIG_BS21', if_true: files('bs21.c'))
++riscv_ss.add(when: 'CONFIG_BS22', if_true: files('bs22.c'))
++riscv_ss.add(when: 'CONFIG_BS20', if_true: files('bs20.c'))
++riscv_ss.add(when: 'CONFIG_BS21E', if_true: files('bs21e.c'))
+ hw_arch += {'riscv': riscv_ss}

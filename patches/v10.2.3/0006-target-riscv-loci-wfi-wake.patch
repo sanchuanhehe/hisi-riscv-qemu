@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ws63-rs <noreply@anthropic.com>
+Date: Thu, 12 Jun 2026 20:30:00 +0800
+Subject: [PATCH] target/riscv: wake WFI on a pending LOCI interrupt (riscv_cpu_has_work)
+
+riscv_cpu_has_work() gated WFI wake-up on riscv_cpu_all_pending() (the mip-based
+standard interrupts) only, ignoring the HiSilicon custom LOCI pending state
+(ws63_locipd & ws63_locien). So a hart parked in WFI never woke for a LOCI IRQ
+(>= 32) -- e.g. BS2X TIMER_0 = 53, the embassy-time alarm -> async firmware hung.
+Also wake on an enabled+pending LOCI. (Ported from the v10.0.0 series 0001.)
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+diff --git a/target/riscv/cpu.c b/target/riscv/cpu.c
+index 18e2456..5a31072 100644
+--- a/target/riscv/cpu.c
++++ b/target/riscv/cpu.c
+@@ -676,7 +676,17 @@ bool riscv_cpu_has_work(CPUState *cs)
+      */
+     return riscv_cpu_all_pending(env) != 0 ||
+         riscv_cpu_sirq_pending(env) != RISCV_EXCP_NONE ||
+-        riscv_cpu_vsirq_pending(env) != RISCV_EXCP_NONE;
++        riscv_cpu_vsirq_pending(env) != RISCV_EXCP_NONE ||
++        /*
++         * HiSilicon WS63/BS2X custom local interrupts (IRQ >= 32, LOCIEN/LOCIPD):
++         * an enabled+pending LOCI must wake WFI, otherwise an idle (WFI-parked)
++         * hart never takes a LOCI-delivered interrupt. WS63's own IRQs in 26-31
++         * ride mip and are covered by riscv_cpu_all_pending() above, so this only
++         * matters for true LOCI sources (e.g. BS2X TIMER_0 = 53). Respects the
++         * individual LOCIEN enable, ignoring mstatus.MIE, per WFI semantics.
++         */
++        (env->ws63_locipd[0] & env->ws63_locien[0]) != 0 ||
++        (env->ws63_locipd[1] & env->ws63_locien[1]) != 0;
+ }
+ #endif /* !CONFIG_USER_ONLY */
+ 
