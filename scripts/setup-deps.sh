@@ -33,6 +33,11 @@ case "$OS" in
     fi
     brew update
     brew install meson ninja pkgconf glib pixman libslirp dylibbundler
+    # QEMU's configure builds a Python venv (mkvenv) that needs `distlib`; brew's
+    # Python (PEP-668 externally-managed) doesn't ship it, so QEMU bails with
+    # "found no usable distlib". Install it for whichever python3 configure picks.
+    python3 -m pip install --break-system-packages --quiet distlib \
+      || pip3 install --break-system-packages --quiet distlib || true
     MGR="macos/brew"
     ;;
 
