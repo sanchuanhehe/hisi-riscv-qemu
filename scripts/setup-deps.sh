@@ -56,6 +56,10 @@ case "$OS" in
         mingw-w64-x86_64-pkgconf \
         mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman \
         mingw-w64-x86_64-libslirp mingw-w64-x86_64-zlib mingw-w64-x86_64-zstd
+    # QEMU's mkvenv needs distlib (same as macOS); mingw Python 3.14 lacks it.
+    pacman -S --needed --noconfirm mingw-w64-x86_64-python-distlib 2>/dev/null \
+      || python -m pip install --quiet distlib 2>/dev/null \
+      || pip install --quiet distlib 2>/dev/null || true
     MGR="windows/msys2-pacman"
     ;;
 
