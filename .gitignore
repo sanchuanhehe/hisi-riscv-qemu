@@ -8,3 +8,7 @@ qemu.log
 *.elf
 # ...but C SDK sample test fixtures are committed binaries (see tests/csdk/)
 !tests/csdk/*.elf
+
+# Proprietary WS63 on-chip ROM dumps (real silicon) — keep LOCAL, do NOT publish.
+# Public repo: committing vendor mask-ROM firmware here is a redistribution risk.
+roms/**/*.bin
